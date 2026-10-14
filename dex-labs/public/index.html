@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lab DeFi 实验站 · 本地 Besu 链</title>
+<style>
+  :root { --bg:#0f1117; --card:#181c26; --border:#2a3040; --text:#e6e9f0;
+          --muted:#8b93a7; --accent:#4f8cff; --ok:#2ecc71; --err:#ff5c5c; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:-apple-system,"PingFang SC",sans-serif; background:var(--bg);
+         color:var(--text); min-height:100vh; }
+  header { display:flex; justify-content:space-between; align-items:center;
+           padding:16px 28px; border-bottom:1px solid var(--border); }
+  header h1 { font-size:18px; }
+  header h1 span { color:var(--accent); }
+  #chain-info { font-size:12px; color:var(--muted); text-align:right; line-height:1.7; }
+  nav.tabs { display:flex; gap:8px; flex-wrap:wrap; max-width:1080px; margin:0 auto;
+             padding:14px 28px 0; }
+  nav.tabs button { width:auto; margin:0; padding:8px 16px; background:transparent;
+           border:1px solid var(--border); color:var(--muted); border-radius:999px;
+           font-size:13px; cursor:pointer; }
+  nav.tabs button:hover { filter:none; border-color:var(--accent); color:var(--text); }
+  nav.tabs button.active { background:var(--accent); border-color:var(--accent); color:#fff; }
+  nav.tabs button.soon { opacity:.55; }
+  .wrap { max-width:1080px; margin:0 auto; padding:20px 24px 40px; display:grid;
+          grid-template-columns:1fr 1fr; gap:20px; }
+  .page { display:none; grid-column:1 / -1; display:none; grid-template-columns:1fr 1fr; gap:20px; }
+  .page.active { display:grid; }
+  .card { background:var(--card); border:1px solid var(--border);
+          border-radius:12px; padding:22px; }
+  .card h2 { font-size:15px; margin-bottom:14px; color:var(--accent); }
+  label { display:block; font-size:12px; color:var(--muted); margin:12px 0 4px; }
+  input { width:100%; padding:10px 12px; border-radius:8px; border:1px solid var(--border);
+          background:#0d0f15; color:var(--text); font-size:14px; }
+  input:focus { outline:none; border-color:var(--accent); }
+  .row { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  button.act { margin-top:16px; width:100%; padding:12px; border:none; border-radius:8px;
+           background:var(--accent); color:#fff; font-size:14px; cursor:pointer; }
+  button.act:hover { filter:brightness(1.15); }
+  button.act:disabled { opacity:.5; cursor:not-allowed; }
+  .btns { display:flex; gap:10px; margin-top:14px; }
+  .btns button { flex:1; margin-top:0; }
+  .btns button.ghost { background:transparent; border:1px solid var(--border); color:var(--text); }
+  .log { grid-column:1 / -1; }
+  #log { max-height:280px; overflow-y:auto; font-family:ui-monospace,monospace;
+         font-size:12px; line-height:1.8; }
+  #log .ok { color:var(--ok); } #log .err { color:var(--err); }
+  #log .dim { color:var(--muted); }
+  .tok, .tx { display:flex; justify-content:space-between; align-items:center;
+         padding:10px 0; border-bottom:1px dashed var(--border); font-size:13px; }
+  .tok small, .tx small { color:var(--muted); font-family:monospace; }
+  .tok a, .tx a { color:var(--accent); cursor:pointer; text-decoration:underline; }
+  .hint { font-size:12px; color:var(--muted); margin-top:10px; line-height:1.6; }
+  .full { grid-column:1 / -1; }
+  #priv { font-family:monospace; font-size:11px; }
+  .road li { font-size:13px; color:var(--muted); line-height:2; margin-left:18px; }
+  .road li b { color:var(--text); }
+</style>
+</head>
+<body>
+<header>
+  <h1>🧪 Lab <span>DeFi 实验站</span></h1>
+  <div id="chain-info">连接中…</div>
+</header>
+
+<nav class="tabs">
+  <button data-page="wallet" class="active">💼 钱包</button>
+  <button data-page="token">🪙 代币</button>
+  <button data-page="nft" class="soon">🎨 NFT</button>
+  <button data-page="stake" class="soon">💎 质押</button>
+  <button data-page="dex" class="soon">🔁 DEX</button>
+  <button data-page="lend" class="soon">🏦 借贷</button>
+  <button data-page="oracle" class="soon">📡 预言机</button>
+  <button data-page="lego" class="soon">🧱 乐高</button>
+  <button data-page="gov" class="soon">🗳️ 治理</button>
+  <button data-page="casino" class="soon">🎰 博彩</button>
+  <button data-page="access" class="soon">🛡️ 身份</button>
+  <button data-page="bridge" class="soon">🌉 桥</button>
+  <button data-page="more" class="soon">🧩 更多</button>
+</nav>
+
+<div class="wrap">
+  <!-- ═══ 钱包 ═══ -->
+  <section id="page-wallet" class="page active">
+    <div class="card full">
+      <h2>当前账户</h2>
+      <div class="row">
+        <div><label>地址</label><input id="addr" readonly placeholder="加载中…"></div>
+        <div><label>ETH 余额（付 gas 用）</label><input id="bal" readonly placeholder="—"></div>
+      </div>
+      <div class="btns">
+        <button class="act ghost" id="btn-dev">使用开发账户</button>
+        <button class="act ghost" id="btn-new">创建新钱包</button>
+        <button class="act ghost" id="btn-refresh">刷新余额</button>
+      </div>
+      <label>导入私钥（hex，仅存在本页面内存中，仅用于本地链）</label>
+      <input id="priv" type="password" placeholder="0x…，输入后回车导入">
+      <div class="hint">⚠️ 教学环境：交易在你浏览器内用 ethers.js 本地签名，
+        私钥不经过服务器；服务器只负责把已签名交易转发上链（绕过浏览器直连 Besu 的 CORS 与 gasPrice 限制）。</div>
+    </div>
+
+    <div class="card">
+      <h2>转账 ETH</h2>
+      <label>接收地址</label>
+      <input id="eth-to" placeholder="0x…">
+      <label>数量（ETH）</label>
+      <input id="eth-amt" type="number" value="0.1" step="0.01">
+      <button class="act" id="btn-eth-send">发送</button>
+      <div class="hint">固定 gasPrice 1 Gwei、gasLimit 21000，约 15 秒出块确认。</div>
+    </div>
+
+    <div class="card">
+      <h2>查询任意地址余额</h2>
+      <label>钱包地址</label>
+      <input id="q-addr" placeholder="0x…，回车或点按钮查询">
+      <button class="act" id="btn-query-bal">查询</button>
+      <label>余额</label>
+      <input id="q-bal" readonly placeholder="—">
+    </div>
+
+    <div class="card">
+      <h2>最近交易</h2>
+      <div id="txs"><div class="hint">暂无交易记录</div></div>
+    </div>
+  </section>
+
+  <!-- ═══ 代币 ═══ -->
+  <section id="page-token" class="page">
+    <div class="card">
+      <h2>发行新代币（ERC-20）</h2>
+      <div class="row">
+        <div><label>代币名称</label><input id="t-name" value="My Coin"></div>
+        <div><label>代币符号</label><input id="t-symbol" value="MYC"></div>
+      </div>
+      <div class="row">
+        <div><label>发行总量（个）</label><input id="t-supply" type="number" value="1000000"></div>
+        <div><label>小数位</label><input id="t-decimals" type="number" value="18" readonly></div>
+      </div>
+      <button class="act" id="btn-deploy">🚀 发行代币</button>
+      <div class="hint">浏览器本地签名创建交易 → 经服务器代理上链 → 等待约 15 秒出块确认。
+        代币总量全部打入当前账户。</div>
+    </div>
+
+    <div class="card">
+      <h2>我的代币</h2>
+      <div id="tokens"><div class="hint">暂无，发行后显示在这里</div></div>
+      <div id="transfer-box" style="display:none">
+        <label>选择代币</label>
+        <select id="tr-token" style="width:100%;padding:10px;border-radius:8px;background:#0d0f15;color:var(--text);border:1px solid var(--border);margin-top:4px"></select>
+        <label>接收地址</label>
+        <input id="tr-to" placeholder="0x…">
+        <label>数量</label>
+        <input id="tr-amount" type="number" value="100">
+        <button class="act" id="btn-transfer">转账</button>
+        <div class="hint" id="tr-from"></div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>收款查询（按地址）</h2>
+      <label>代币合约地址</label>
+      <input id="rcv-token" list="rcv-token-list" placeholder="选择下方登记代币或直接粘贴 0x…">
+      <datalist id="rcv-token-list"></datalist>
+      <label>接收地址</label>
+      <input id="rcv-addr" placeholder="0x…，可用当前账户查询自己收到的代币">
+      <button class="act" id="btn-rcv-query">🔍 查询收到的代币</button>
+      <div id="rcv-result" style="margin-top:10px"><div class="hint">转账完成后在这里查询接收地址：当前余额 + 最近链上入账（Transfer 事件）。</div></div>
+    </div>
+  </section>
+
+  <!-- ═══ NFT ═══ -->
+  <section id="page-nft" class="page">
+    <div class="card">
+      <h2>铸造 NFT（ERC-721）</h2>
+      <label>藏品名称（本地列表展示用）</label>
+      <input id="n-name" value="Lab 藏品">
+      <label>tokenURI（元数据链接，支持 data:json）</label>
+      <input id="n-uri" placeholder="data:application/json,{...} 或 https://…">
+      <button class="act" id="btn-mint">🪙 铸造</button>
+      <div class="hint">tokenId 由合约自增分配（全局唯一），铸造事件 Transfer(0x0 → 你)。
+        也可直接复制示例：<a id="n-sample">填入示例 data:json</a></div>
+    </div>
+
+    <div class="card">
+      <h2>我的藏品</h2>
+      <div id="nfts"><div class="hint">暂无，铸造后显示在这里</div></div>
+      <div class="btns">
+        <button class="act ghost" id="btn-nft-verify">🔍 链上确权（ownerOf + tokenURI）</button>
+      </div>
+      <div class="hint">确权会按藏品列表里的 tokenId 调链上 ownerOf/tokenURI，回显真实持有人与元数据。</div>
+    </div>
+
+    <div class="card full">
+      <h2>转让 NFT</h2>
+      <div class="row">
+        <div><label>选择藏品（tokenId）</label>
+          <select id="nft-token" style="width:100%;padding:10px;border-radius:8px;background:#0d0f15;color:var(--text);border:1px solid var(--border);margin-top:4px"></select></div>
+        <div><label>接收地址</label><input id="nft-to" placeholder="0x…"></div>
+      </div>
+      <button class="act" id="btn-nft-send">转手（transferFrom）</button>
+      <div class="hint" id="nft-from"></div>
+    </div>
+
+    <div class="card full">
+      <h2>收款查询（按地址）</h2>
+      <label>NFT 合约地址</label>
+      <input id="nrcv-addr0" placeholder="留空 = 使用已部署的 NFT 合约">
+      <label>接收地址</label>
+      <input id="nrcv-addr" placeholder="0x…，查询该地址当前持有的全部 NFT">
+      <button class="act" id="btn-nrcv-query">🔍 查询收到的 NFT</button>
+      <div id="nrcv-result" style="margin-top:10px"><div class="hint">转手完成后在这里查询接收地址：链上实际持有的 tokenId 清单（按 Transfer 事件推算，含当前持有人与元数据）。</div></div>
+    </div>
+  </section>
+
+  <!-- ═══ 质押 ═══ -->
+  <section id="page-stake" class="page">
+    <div class="card">
+      <h2>质押池</h2>
+      <label>选择要质押的代币（来自"我的代币"）</label>
+      <select id="stake-token" style="width:100%;padding:10px;border-radius:8px;background:#0d0f15;color:var(--text);border:1px solid var(--border);margin-top:4px"></select>
+      <label>奖励金库注入量（3600 秒发完）</label>
+      <input id="reward-amt" type="number" value="10000">
+      <button class="act" id="btn-stake-pool">🏗️ 部署质押池（部署 → 注入金库）</button>
+      <div class="hint" id="stake-pool-info">尚未部署。每个代币各有一个质押池，部署 = 3 笔交易约 45 秒。</div>
+    </div>
+
+    <div class="card">
+      <h2>质押操作</h2>
+      <label>质押数量</label>
+      <input id="stake-amt" type="number" value="1000">
+      <div class="btns">
+        <button class="act" id="btn-stake">💎 质押（自动先授权）</button>
+        <button class="act ghost" id="btn-claim">💰 领取收益</button>
+        <button class="act ghost" id="btn-unstake">↩️ 赎回全部本金</button>
+      </div>
+      <div class="hint" id="stake-from"></div>
+    </div>
+
+    <div class="card full">
+      <h2>我的质押状态 <a id="btn-stake-refresh" style="font-size:12px;color:var(--accent);cursor:pointer">🔄 刷新</a></h2>
+      <div class="row">
+        <div><label>质押中数量</label><input id="st-total" readonly value="—"></div>
+        <div><label>待领取奖励</label><input id="st-earned" readonly value="—"></div>
+      </div>
+      <div class="row">
+        <div><label>池内总质押</label><input id="st-pool" readonly value="—"></div>
+        <div><label>奖励速率 / 剩余时间</label><input id="st-rate" readonly value="—"></div>
+      </div>
+      <div class="hint">奖励按秒实时累计（block.timestamp 驱动）："待领取奖励"每次刷新都会增长；
+        收益与本金同币种，用注入金库的代币发放。</div>
+    </div>
+  </section>
+
+  <!-- ═══ DEX ═══ -->
+  <section id="page-dex" class="page">
+    <div class="card">
+      <h2>交易池（ETH ⇄ 代币）</h2>
+      <label>选择代币（来自"我的代币"）</label>
+      <select id="dex-token" style="width:100%;padding:10px;border-radius:8px;background:#0d0f15;color:var(--text);border:1px solid var(--border);margin-top:4px"></select>
+      <div class="row">
+        <div><label>注入 ETH 数量</label><input id="add-eth" type="number" value="1" step="0.01"></div>
+        <div><label>代币数量（首注定价用，续注为上限）</label><input id="add-token" type="number" value="2000"></div>
+      </div>
+      <button class="act" id="btn-amm-add">💧 注入流动性（首注自动建池）</button>
+      <div class="hint" id="amm-info">尚未建池。首注按你给的 ETH/代币比例定初始价格；续注按池内比例自动配对代币。</div>
+    </div>
+
+    <div class="card">
+      <h2>兑换</h2>
+      <label>方向</label>
+      <select id="swap-dir" style="width:100%;padding:10px;border-radius:8px;background:#0d0f15;color:var(--text);border:1px solid var(--border);margin-top:4px">
+        <option value="eth2t">ETH → 代币</option>
+        <option value="t2eth">代币 → ETH</option>
+      </select>
+      <label>输入数量</label>
+      <input id="swap-amt" type="number" value="0.1" step="0.01">
+      <button class="act ghost" id="btn-amm-quote">💱 获取报价（扣 0.3% 手续费后）</button>
+      <div class="hint" id="swap-quote">—</div>
+      <button class="act" id="btn-amm-swap">🔄 执行兑换</button>
+      <div class="hint" id="dex-from"></div>
+    </div>
+
+    <div class="card full">
+      <h2>池状态与我的 LP <a id="btn-amm-refresh" style="font-size:12px;color:var(--accent);cursor:pointer">🔄 刷新</a></h2>
+      <div class="row">
+        <div><label>ETH 储备</label><input id="lp-eth" readonly value="—"></div>
+        <div><label>代币储备</label><input id="lp-token" readonly value="—"></div>
+      </div>
+      <div class="row">
+        <div><label>我的 LP 份额</label><input id="lp-mine" readonly value="—"></div>
+        <div><label>现价（1 ETH = ? 代币）</label><input id="lp-price" readonly value="—"></div>
+      </div>
+      <button class="act ghost" id="btn-amm-remove">↩️ 撤出我的全部流动性</button>
+    </div>
+  </section>
+
+  <!-- ═══ 借贷 ═══ -->
+  <section id="page-lend" class="page">
+    <div class="card">
+      <h2>借贷市场（抵押 ETH 借代币）</h2>
+      <label>选择借出资产（来自"我的代币"）</label>
+      <select id="lend-token" style="width:100%;padding:10px;border-radius:8px;background:#0d0f15;color:var(--text);border:1px solid var(--border);margin-top:4px"></select>
+      <div class="row">
+        <div><label>初始价格（1 ETH = ? 代币）</label><input id="lend-price" type="number" value="2000"></div>
+        <div><label>注入可借资金</label><input id="lend-fund" type="number" value="10000"></div>
+      </div>
+      <button class="act" id="btn-lend-setup">🏗️ 部署市场（部署 → 注入可借资金）</button>
+      <div class="hint" id="lend-info">尚未部署。抵押率 66%，清算奖金 8%，演示利率每秒 1%（真实协议约年化个位数）。</div>
+    </div>
+
+    <div class="card">
+      <h2>操作</h2>
+      <div class="row">
+        <div><label>存入 ETH（抵押）</label><input id="lend-dep" type="number" value="1" step="0.01"></div>
+        <div><label>借出代币数量</label><input id="lend-borrow-amt" type="number" value="1000"></div>
+      </div>
+      <div class="btns">
+        <button class="act" id="btn-lend-deposit">📥 存入 ETH</button>
+        <button class="act" id="btn-lend-borrow">💸 借出</button>
+        <button class="act ghost" id="btn-lend-repay">💰 还清全部（本金+利息）</button>
+        <button class="act ghost" id="btn-lend-withdraw">↩️ 取回全部抵押 ETH</button>
+      </div>
+      <div class="hint" id="lend-from"></div>
+    </div>
+
+    <div class="card full">
+      <h2>我的账户 <a id="btn-lend-refresh" style="font-size:12px;color:var(--accent);cursor:pointer">🔄 刷新</a></h2>
+      <div class="row">
+        <div><label>抵押 ETH</label><input id="ld-coll" readonly value="—"></div>
+        <div><label>借款本金</label><input id="ld-prin" readonly value="—"></div>
+      </div>
+      <div class="row">
+        <div><label>应计债务（含利息）</label><input id="ld-debt" readonly value="—"></div>
+        <div><label>健康度（&lt;1.0 可被清算）</label><input id="ld-health" readonly value="—"></div>
+      </div>
+      <div class="row">
+        <div><label>最大可借</label><input id="ld-max" readonly value="—"></div>
+        <div><label>池内可借 / 当前价格</label><input id="ld-pool" readonly value="—"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ 预言机 ═══ -->
+  <section id="page-oracle" class="page">
+    <div class="card">
+      <h2>📡 预言机（多数据源 · 中位数聚合）</h2>
+      <div class="row">
+        <div><label>初始价格（1 ETH = ? 代币）</label><input id="orc-price" type="number" value="2000"></div>
+        <div><label>聚合最少报价数</label><input id="orc-min" type="number" value="2" min="1"></div>
+      </div>
+      <button class="act" id="btn-orc-deploy">🏗️ 部署预言机</button>
+      <div class="hint" id="orc-info">尚未部署。模型：多个数据源各自报价 → 合约排序取中位数 → 报价数达标才上链新轮次。</div>
+    </div>
+
+    <div class="card">
+      <h2>数据源网络（Reporter）</h2>
+      <button class="act" id="btn-orc-prep">🔧 一键准备 3 个测试数据源</button>
+      <div class="hint">自动生成 3 个链上账户（模拟交易所/做市商节点）、由开发账户转入 ETH 付 gas、注册进白名单。私钥仅存本浏览器 localStorage。</div>
+      <div id="orc-reporters" style="margin-top:10px"><div class="hint">尚未准备数据源</div></div>
+    </div>
+
+    <div class="card">
+      <h2>报价与聚合</h2>
+      <div class="btns">
+        <button class="act ghost" id="btn-orc-scene-normal">正常场景 2000/2005/1995</button>
+        <button class="act ghost" id="btn-orc-scene-attack">🚨 异常值场景 2000/2002/99999</button>
+        <button class="act ghost" id="btn-orc-scene-up">行情上涨 2100/2105/2095</button>
+      </div>
+      <div class="btns">
+        <button class="act ghost" id="btn-orc-refresh">🔄 手动触发聚合（refresh）</button>
+      </div>
+      <div class="row">
+        <div><label>当前轮次 roundId</label><input id="oc-round" readonly value="—"></div>
+        <div><label>聚合价（1 ETH = ?）</label><input id="oc-answer" readonly value="—"></div>
+      </div>
+      <div class="row">
+        <div><label>聚合时间</label><input id="oc-time" readonly value="—"></div>
+        <div><label>若现在聚合（中位数 / 报价数）</label><input id="oc-pending" readonly value="—"></div>
+      </div>
+      <div class="hint">每来一笔报价合约都自动尝试聚合：报价数不足门槛时轮次不动（可防少数数据源操纵）。</div>
+    </div>
+
+    <div class="card full">
+      <h2>喂价给借贷市场（DeFi 组合）</h2>
+      <label>选择借贷市场（按借出资产）</label>
+      <select id="orc-lend-token" style="width:100%;padding:10px;border-radius:8px;background:#0d0f15;color:var(--text);border:1px solid var(--border);margin-top:4px"></select>
+      <div class="row" style="margin-top:10px">
+        <div><label>借贷市场当前价格</label><input id="oc-lend-price" readonly value="—"></div>
+        <div><label>预言机最新价</label><input id="oc-oracle-price2" readonly value="—"></div>
+      </div>
+      <button class="act" id="btn-orc-sync" style="margin-top:10px">⬇️ 把预言机最新价同步到借贷市场（admin setPrice）</button>
+      <div class="hint" id="orc-from"></div>
+      <div class="hint">真实世界里 Aave/Compound 就是这样消费 Chainlink 价格的：合约只信任链上聚合结果，从不自己上网查价。</div>
+    </div>
+  </section>
+
+  <!-- ═══ DeFi 乐高 ═══ -->
+  <section id="page-lego" class="page">
+    <div class="card">
+      <h2>🧱 LP 抵押借贷金库（AMM + 预言机 + 借贷 三合一）</h2>
+      <label>选择资产（自动关联该代币的 AMM 池与共用预言机）</label>
+      <select id="lg-token" style="width:100%;padding:10px;border-radius:8px;background:#0d0f15;color:var(--text);border:1px solid var(--border);margin-top:4px"></select>
+      <div class="row" style="margin-top:8px">
+        <div><label>注入可借代币（fund）</label><input id="lg-fund" type="number" value="10000"></div>
+        <div><label>AMM 池地址</label><input id="lg-amm" readonly value="—"></div>
+      </div>
+      <button class="act" id="btn-lg-setup">🏗️ 部署金库（部署 → 注入可借资金）</button>
+      <div class="hint" id="lg-info">尚未部署。前置：该代币已有 AMM 池（DEX 页建池）且预言机已部署。LP 抵押率 50%（低于纯 ETH，因 LP 承担无常损失），清算折扣 8%。</div>
+    </div>
+
+    <div class="card">
+      <h2>质押流动性（ETH+代币 → 池 LP → 锁入金库）</h2>
+      <div class="row">
+        <div><label>投入 ETH</label><input id="lg-eth" type="number" value="0.1" step="0.01"></div>
+        <div><label>代币上限 maxToken（滑点保护）</label><input id="lg-maxtoken" type="number" value="220"></div>
+      </div>
+      <div class="btns">
+        <button class="act" id="btn-lg-stake">🔒 质押流动性（approve → addLiquidity 代持）</button>
+        <button class="act ghost" id="btn-lg-unstake">↩️ 撤出全部 LP（换回 ETH+代币）</button>
+      </div>
+      <div class="hint" id="lg-from"></div>
+    </div>
+
+    <div class="card">
+      <h2>借款 / 还款</h2>
+      <div class="row">
+        <div><label>借款数量</label><input id="lg-borrow-amt" type="number" value="50"></div>
+        <div>&nbsp;</div>
+      </div>
+      <div class="btns">
+        <button class="act" id="btn-lg-borrow">💸 借出</button>
+        <button class="act ghost" id="btn-lg-repay">💰 还清全部（本金+利息）</button>
+      </div>
+    </div>
+
+    <div class="card full">
+      <h2>我的金库头寸 <a id="btn-lg-refresh" style="font-size:12px;color:var(--accent);cursor:pointer">🔄 刷新</a></h2>
+      <div class="row">
+        <div><label>抵押 LP 份额</label><input id="lg-lp" readonly value="—"></div>
+        <div><label>LP 估值（ETH 部分 + 代币部分）</label><input id="lg-value" readonly value="—"></div>
+      </div>
+      <div class="row">
+        <div><label>借款本金</label><input id="lg-prin" readonly value="—"></div>
+        <div><label>应计债务（含利息）</label><input id="lg-debt" readonly value="—"></div>
+      </div>
+      <div class="row">
+        <div><label>健康度（&lt;1.0 可清算）</label><input id="lg-health" readonly value="—"></div>
+        <div><label>最大可借 / 池内可借</label><input id="lg-max" readonly value="—"></div>
+      </div>
+    </div>
+
+    <div class="card full">
+      <h2>清算演练</h2>
+      <div class="btns">
+        <button class="act ghost" id="btn-lg-makeborrower">🔧 一键准备借款人（开户→质押→借到购买力的 60%）</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <div><label>清算目标地址</label><input id="lg-liq-target" placeholder="0x…"></div>
+        <div><label>目标健康度</label><input id="lg-liq-health" readonly value="—"></div>
+      </div>
+      <button class="act" id="btn-lg-liquidate" style="margin-top:8px">⚡ 清算该地址（当前账户代还债务，折扣拿走 LP）</button>
+      <div class="hint">演示路径：借款人借到购买力的 60%，每秒 1% 利息约 70 秒后健康度跌破 1 → 当前账户清算，拿到的 LP 可点上方"撤出全部 LP"变现。</div>
+    </div>
+  </section>
+
+  <!-- ═══ 治理 ═══ -->
+  <section id="page-gov" class="page">
+    <div class="card">
+      <h2>🗳️ 链上治理（ERC-20Votes + Governor + Timelock）</h2>
+      <div class="row">
+        <div><label>投票代币名称 / 符号</label><input id="gv-tname" value="Governance Token"></div>
+        <div><label>符号</label><input id="gv-tsym" value="GOV"></div>
+      </div>
+      <div class="row">
+        <div><label>初始总量（全部给部署者）</label><input id="gv-tsupply" type="number" value="1000000"></div>
+        <div><label>投票窗口（秒）</label><input id="gv-period" type="number" value="600"></div>
+      </div>
+      <div class="row">
+        <div><label>法定票数 quorum</label><input id="gv-quorum" type="number" value="1000"></div>
+        <div><label>Timelock 延迟（秒）</label><input id="gv-delay" type="number" value="30"></div>
+      </div>
+      <button class="act" id="btn-gv-setup">🏗️ 一键部署治理体系（VoteToken→Box→Timelock→Governor→交接权限）</button>
+      <div class="hint" id="gv-info">尚未部署。部署后：Box 的所有权交给 Timelock，Timelock 的管理员是 Governor——任何人想改 Box 必须走"提案→投票→排队→延迟→执行"。</div>
+    </div>
+
+    <div class="card">
+      <h2>投票权（必须先 delegate，持币≠有票）</h2>
+      <div class="row">
+        <div><label>我的 GOV 余额</label><input id="gv-bal" readonly value="—"></div>
+        <div><label>我的当前投票权</label><input id="gv-votes" readonly value="—"></div>
+      </div>
+      <div class="btns">
+        <button class="act ghost" id="btn-gv-voters">🧑‍🤝‍🧑 一键准备 2 个选民（转 gas+5000 GOV→各自自委托）</button>
+      </div>
+      <div class="hint" id="gv-voters-info">选民地址：尚未准备</div>
+      <div class="hint" id="gv-from"></div>
+    </div>
+
+    <div class="card">
+      <h2>提交提案（目标默认 Box.setValue）</h2>
+      <div class="row">
+        <div><label>目标合约（默认 Box）</label><input id="gv-target" readonly value="—"></div>
+        <div><label>Box 新值</label><input id="gv-newval" type="number" value="42"></div>
+      </div>
+      <label>提案描述</label>
+      <input id="gv-desc" value="把 Box 的值设置为 42（治理教学提案）">
+      <button class="act" id="btn-gv-propose" style="margin-top:8px">📜 提交提案（需 ≥1 票的提案门槛）</button>
+      <div class="hint">提案快照锁定提案区块的持股历史；提案后买入/收到的代币不计票，须提案前完成委托。</div>
+    </div>
+
+    <div class="card full">
+      <h2>提案状态与治理动作 <a id="btn-gv-refresh" style="font-size:12px;color:var(--accent);cursor:pointer">🔄 刷新</a></h2>
+      <div class="row">
+        <div><label>提案 ID</label><input id="gv-pid" type="number" value="1"></div>
+        <div><label>状态</label><input id="gv-state" readonly value="—"></div>
+      </div>
+      <div class="row">
+        <div><label>赞成票 / 反对票 / 弃权</label><input id="gv-tally" readonly value="—"></div>
+        <div><label>快照区块 / 截止时间</label><input id="gv-snap" readonly value="—"></div>
+      </div>
+      <div class="btns">
+        <button class="act" id="btn-gv-vote-for">👍 当前账户投赞成</button>
+        <button class="act ghost" id="btn-gv-vote-against">👎 投反对</button>
+        <button class="act ghost" id="btn-gv-voters-vote">🧑‍🤝‍🧑 两个选民投赞成</button>
+      </div>
+      <div class="btns">
+        <button class="act" id="btn-gv-queue">⏳ 提案通过后：排入 Timelock</button>
+        <button class="act" id="btn-gv-execute">▶️ 延迟到期后：执行（Box 值改变）</button>
+      </div>
+      <div class="hint" id="gv-action-hint">流程：投票窗口结束且赞成&gt;反对且达法定票数 → queue → 等 30 秒 → execute。</div>
+    </div>
+  </section>
+
+  <!-- ═══ 博彩 ═══ -->
+  <section id="page-casino" class="page">
+    <div class="card">
+      <h2>🎰 链上赌场（blockhash 延迟开奖 + 固定赔率）</h2>
+      <div class="hint">原理：本区块的哈希在<b>本块内永远读不到</b>（EVM 只存最近
+        256 个区块哈希）。下注时承诺"3 个区块后的哈希"做种子，之后任何人 reveal
+        开奖：结果 = hash % 100。出块者下注时也无法预知未来哈希——但注意
+        <b>blockhash 仍可被重仓庄家轻微操纵</b>，真实产品必须用 Chainlink VRF。</div>
+      <div class="row">
+        <div><label>庄家初始赌池（ETH，≥1）</label><input id="cs-seed" type="number" value="1.2" step="0.1"></div>
+        <div><label>下注金额（ETH，≥0.01）</label><input id="cs-amount" type="number" value="0.1" step="0.01"></div>
+      </div>
+      <button class="act" id="btn-cs-deploy">🏗️ 部署赌场（庄家注资开池）</button>
+      <div class="hint" id="cs-info">尚未部署。赔率：开小(&lt;50) 1.98× / 开大(≥50) 1.96× / 押中数字(1%) 90×。</div>
+    </div>
+
+    <div class="card">
+      <h2>🎲 下注与开奖</h2>
+      <div class="row">
+        <div><label>玩法</label>
+          <select id="cs-choice" style="width:100%;padding:10px;border-radius:8px;border:1px solid var(--border);background:#0d0f15;color:var(--text)">
+            <option value="0">开小（&lt;50，赔率 1.98×）</option>
+            <option value="1">开大（≥50，赔率 1.96×）</option>
+            <option value="2">押中数字（1%，赔率 90×）</option>
+          </select>
+        </div>
+        <div><label>押中数字（0-99，仅"押中数字"用）</label><input id="cs-guess" type="number" value="42" min="0" max="99"></div>
+      </div>
+      <div class="btns">
+        <button class="act" id="btn-cs-bet">🎲 下注</button>
+        <button class="act ghost" id="btn-cs-reveal">🔓 开奖（3 块后）</button>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <div><label>查询注单 ID</label><input id="cs-bid" type="number" value="1"></div>
+        <div><label>赌场余额 / 总下注</label><input id="cs-house" readonly value="—"></div>
+      </div>
+      <div class="hint" id="cs-bet-info">下注后这里显示注单状态（seedBlock、可开奖时间、结果）</div>
+    </div>
+  </section>
+
+  <!-- ═══ 身份权限 ═══ -->
+  <section id="page-access" class="page">
+    <div class="card">
+      <h2>🛡️ 身份与权限（AccessControl + 白名单 mint）</h2>
+      <div class="hint">原理：权限不是"一个 owner"，而是<b>角色 → 成员</b>的多对多关系。
+        角色是 bytes32 标识（= keccak256("MINTER_ROLE")）。合约内置三个角色：
+        <b>DEFAULT_ADMIN</b>（发/收角色）、<b>MINTER</b>（铸币）、<b>PAUSER</b>（暂停）。
+        本页会造两个"员工"钱包演示：授权 → mint 成功 → 回收 → mint 被拒 → 暂停 → 恢复。</div>
+      <div class="row">
+        <div><label>每次 mint 数量（VIP）</label><input id="ac-amount" type="number" value="100" step="10"></div>
+        <div><label>合约状态</label><input id="ac-state" readonly value="—"></div>
+      </div>
+      <button class="act" id="btn-ac-deploy">🏗️ 部署 VIP 代币（我拿 ADMIN）</button>
+      <div class="hint" id="ac-info">尚未部署。部署者只拿 DEFAULT_ADMIN_ROLE——不是万能 owner，发角色之外寸步难行。</div>
+    </div>
+
+    <div class="card">
+      <h2>👥 员工与角色</h2>
+      <div class="hint">"造员工"= 生成一个全新随机钱包（自动转 0.02 ETH gas 费）。默认演示把员工提拔为 MINTER。</div>
+      <div class="btns">
+        <button class="act" id="btn-ac-hire">🧑‍💼 造员工（自动转 gas）</button>
+        <button class="act ghost" id="btn-ac-grant-minter">⬆️ 提拔员工为 MINTER</button>
+        <button class="act ghost" id="btn-ac-grant-pauser">⬆️ 提拔员工为 PAUSER</button>
+      </div>
+      <div class="btns" style="margin-top:8px">
+        <button class="act ghost" id="btn-ac-revoke-minter">⬇️ 回收员工 MINTER</button>
+        <button class="act ghost" id="btn-ac-renounce">🚪 员工自弃 MINTER（renounce）</button>
+      </div>
+      <div class="hint" id="ac-roles">先部署合约再造员工。</div>
+    </div>
+
+    <div class="card">
+      <h2>🚿 受权限约束的操作</h2>
+      <div class="btns">
+        <button class="act" id="btn-ac-mint-admin">💰 ADMIN 亲自 mint（预期失败）</button>
+        <button class="act" id="btn-ac-mint-worker">💰 员工 mint（MINTER 才成功）</button>
+      </div>
+      <div class="btns" style="margin-top:8px">
+        <button class="act ghost" id="btn-ac-pause">⏸️ 员工暂停（PAUSER）</button>
+        <button class="act ghost" id="btn-ac-unpause">▶️ 员工恢复</button>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <div><label>查余额的地址</label><input id="ac-check" type="text" placeholder="0x…（留空查员工）"></div>
+        <div><label>balanceOf</label><input id="ac-bal" readonly value="—"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ 跨链桥 ═══ -->
+  <section id="page-bridge" class="page">
+    <div class="card">
+      <h2>🌉 跨链桥（锁仓 + 映射发行，同链双合约模拟两侧）</h2>
+      <div class="hint">原理：桥不创造资产——A 侧（源链）把真币<b>锁进金库</b>，
+        验证者对 (单号, 收款人, 金额) 签名，B 侧（目标链）收齐多数签名后
+        <b>放行等量映射币</b>；回程反之：烧掉映射币，A 侧验签后放还真币。
+        本页在同一条 Besu 链部署 A/B 两个金库合约 + 一个映射代币来模拟。</div>
+      <div class="row">
+        <div><label>验证者数量（复用预言机 reporter 的 3 个私钥）</label><input id="br-vals" type="number" value="3" readonly></div>
+        <div><label>放行签名数（quorum）</label><input id="br-quorum" type="number" value="2"></div>
+      </div>
+      <button class="act" id="btn-br-setup">🏗️ 部署桥（A 金库 + B 金库 + 映射币 + 灌流动性）</button>
+      <div class="hint" id="br-info">尚未部署。需要先备好预言机数据源（📡 预言机页 → 准备数据源），验证者即它们。</div>
+    </div>
+
+    <div class="card">
+      <h2>➡️ 跨过去（A → B）</h2>
+      <div class="row">
+        <div><label>锁定 ETH 金额</label><input id="br-amount" type="number" value="0.05" step="0.01"></div>
+        <div><label>单号 nonce</label><input id="br-nonce" type="number" value="1"></div>
+      </div>
+      <div class="btns">
+        <button class="act" id="btn-br-deposit">🔒 A 侧锁定（deposit）</button>
+        <button class="act ghost" id="btn-br-mint">🪙 验签放行（B 侧 confirmMint）</button>
+      </div>
+      <div class="hint" id="br-out">deposit 后这里显示单号与状态；点验签放行会收集 3 个验证者私钥中多数人的 EIP-191 签名。</div>
+    </div>
+
+    <div class="card">
+      <h2>⬅️ 跨回来（B → A）</h2>
+      <div class="row">
+        <div><label>回程单号 nonce</label><input id="br-rnonce" type="number" value="4"></div>
+        <div><label>映射币余额（B 侧我的地址）</label><input id="br-pegbal" readonly value="—"></div>
+      </div>
+      <div class="btns">
+        <button class="act" id="btn-br-unlock">🔥 B 侧烧币（unlock）</button>
+        <button class="act ghost" id="btn-br-unlockconfirm">🔓 A 侧验签放真币（confirmUnlock）</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ 更多 ═══ -->
+  <section id="page-more" class="page">
+    <div class="card full">
+      <h2>🧩 后续路线图</h2>
+      <ul class="road">
+        <li><b>DeFi 乐高</b>：组合上述模块（如 LP 抵押借贷）</li>
+        <li><b>治理</b>：ERC-20Votes 投票 + Timelock</li>
+        <li><b>桥（跨链）</b>：锁仓 + 映射发行</li>
+        <li><b>游戏/博彩</b>：链上随机数与下注结算</li>
+        <li><b>身份/权限</b>：白名单、角色控制（AccessControl）</li>
+        <li><b>供应链/金融</b>：联盟链场景的多签与溯源</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- 日志 -->
+  <div class="card log">
+    <h2>操作日志</h2>
+    <div id="log"><div class="dim">等待操作…</div></div>
+  </div>
+</div>
+
+<script src="/vendor/ethers.6.umd.min.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

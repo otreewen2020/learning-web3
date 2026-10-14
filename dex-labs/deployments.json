@@ -1,0 +1,11 @@
+{
+  "LabToken": {
+    "address": "0x97498B1E705C769CE71aAeF07ad511CeeF7A61A8",
+    "deployer": "0xCbd6949b0328EDF919b2883afAF0d413CfE68438",
+    "blockNumber": 175,
+    "deployedAt": "2026-10-13T13:31:11.988Z",
+    "args": [
+      "1000000"
+    ]
+  }
+}

@@ -253,40 +253,40 @@ async function init() {
   }
 
   factoryData = await (await fetch("/factory")).json();
-  log(`发币模板已加载（字节码 ${Math.round(factoryData.bytecode.length / 2)}KB）`, "ok");
+  log(`发币模板已加载（字节码 ${Math.round(factoryData.bytecode.length / 2 / 1024)}KB）`, "ok");
   try {
     nftData = await (await fetch("/nft")).json();
-    log(`NFT 模板已加载（字节码 ${Math.round(nftData.bytecode.length / 2)}KB）`, "ok");
+    log(`NFT 模板已加载（字节码 ${Math.round(nftData.bytecode.length / 2 / 1024)}KB）`, "ok");
   } catch (e) {
     log("NFT 模板加载失败：" + e.message, "err");
   }
   try {
     stakingData = await (await fetch("/staking")).json();
-    log(`质押池模板已加载（字节码 ${Math.round(stakingData.bytecode.length / 2)}KB）`, "ok");
+    log(`质押池模板已加载（字节码 ${Math.round(stakingData.bytecode.length / 2 / 1024)}KB）`, "ok");
   } catch (e) {
     log("质押池模板加载失败：" + e.message, "err");
   }
   try {
     ammData = await (await fetch("/amm")).json();
-    log(`AMM 模板已加载（字节码 ${Math.round(ammData.bytecode.length / 2)}KB）`, "ok");
+    log(`AMM 模板已加载（字节码 ${Math.round(ammData.bytecode.length / 2 / 1024)}KB）`, "ok");
   } catch (e) {
     log("AMM 模板加载失败：" + e.message, "err");
   }
   try {
     lendingData = await (await fetch("/lending")).json();
-    log(`借贷市场模板已加载（字节码 ${Math.round(lendingData.bytecode.length / 2)}KB）`, "ok");
+    log(`借贷市场模板已加载（字节码 ${Math.round(lendingData.bytecode.length / 2 / 1024)}KB）`, "ok");
   } catch (e) {
     log("借贷市场模板加载失败：" + e.message, "err");
   }
   try {
     oracleData = await (await fetch("/oracle")).json();
-    log(`预言机模板已加载（字节码 ${Math.round(oracleData.bytecode.length / 2)}KB）`, "ok");
+    log(`预言机模板已加载（字节码 ${Math.round(oracleData.bytecode.length / 2 / 1024)}KB）`, "ok");
   } catch (e) {
     log("预言机模板加载失败：" + e.message, "err");
   }
   try {
     legoData = await (await fetch("/lego")).json();
-    log(`乐高金库模板已加载（字节码 ${Math.round(legoData.bytecode.length / 2)}KB）`, "ok");
+    log(`乐高金库模板已加载（字节码 ${Math.round(legoData.bytecode.length / 2 / 1024)}KB）`, "ok");
   } catch (e) {
     log("乐高金库模板加载失败：" + e.message, "err");
   }

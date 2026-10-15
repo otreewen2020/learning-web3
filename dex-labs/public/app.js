@@ -180,7 +180,7 @@ async function refreshBalance() {
   } catch {}
 }
 
-// 查询任意地址余额
+// 查询任意地址余额（原生 ETH + 自动扫描 ERC-20 代币）
 async function queryBalance() {
   const addr = ($("q-addr").value || "").trim();
   if (!window.ethers.isAddress(addr)) return log("请输入有效地址（0x…）", "err");
@@ -188,7 +188,68 @@ async function queryBalance() {
     const wei = await rpc("eth_getBalance", [addr, "latest"]);
     $("q-bal").value = window.ethers.formatEther(wei) + " ETH";
     log("余额查询 " + addr.slice(0, 10) + "…：" + window.ethers.formatEther(wei) + " ETH");
-  } catch (e) { log("查询失败: " + e.message, "err"); }
+  } catch (e) { log("查询失败: " + e.message, "err"); return; }
+  queryTokenBalances(addr); // 异步补查代币余额，不阻塞 ETH 结果
+}
+
+// 扫描某地址的 ERC-20 余额：本浏览器登记簿代币 + 最近 4096 块 Transfer 事件发现的代币
+async function queryTokenBalances(addr) {
+  const box = $("q-tokens");
+  if (!box) return;
+  const pad = (a) => a.toLowerCase().replace(/^0x/, "").padStart(64, "0");
+  const enc = window.ethers.AbiCoder.defaultAbiCoder();
+  const dec = (arr, hex) => { try { return enc.decode(arr, hex)[0]; } catch { return null; } };
+  box.innerHTML = '<div class="hint">正在扫描该地址的代币余额…</div>';
+  try {
+    // 1) 候选代币 = 登记簿 + 链上日志扫描（转出/转入双向）
+    const cand = new Map();
+    JSON.parse(localStorage.getItem(KEY) || "[]").forEach((t) =>
+      cand.set(t.address.toLowerCase(), { name: t.name, symbol: t.symbol }));
+    try {
+      const latest = parseInt(await rpc("eth_blockNumber"), 16);
+      const fromBlock = "0x" + Math.max(0, latest - 4095).toString(16);
+      const topic = pad(addr);
+      const sig = window.ethers.id("Transfer(address,address,uint256)");
+      const [sent, got] = await Promise.all([
+        rpc("eth_getLogs", [{ fromBlock, toBlock: "latest", topics: [sig, topic] }]),
+        rpc("eth_getLogs", [{ fromBlock, toBlock: "latest", topics: [sig, null, topic] }]),
+      ]);
+      (sent || []).concat(got || []).forEach((L) => {
+        if (L.address && !cand.has(L.address.toLowerCase())) cand.set(L.address.toLowerCase(), {});
+      });
+    } catch {} // 日志扫描失败不影响登记簿代币查询
+    // 2) 逐个查：合约存在 → 余额；无代码 → 标记失效（多为链重置前的旧登记）
+    const rows = [];
+    for (const [t, meta] of cand) {
+      let code = "0x";
+      try { code = await rpc("eth_getCode", [t, "latest"]); } catch {}
+      if (!code || code === "0x") {
+        rows.push(`<div class="hint">⚠️ ${meta.name || "代币"} <small>${t.slice(0, 10)}…</small> — 合约不存在（链重置前的旧登记）</div>`);
+        continue;
+      }
+      try {
+        const balHex = await rpc("eth_call", [{ to: t, data: "0x70a08231" + pad(addr) }, "latest"]);
+        const bal = window.ethers.formatUnits(balHex && balHex !== "0x" ? balHex : "0x0");
+        let label = meta.name && meta.symbol ? `${meta.name} (${meta.symbol})` : "";
+        if (!label) { // 未登记的代币：链上读 name()/symbol()
+          const [sym, nm] = await Promise.all([
+            rpc("eth_call", [{ to: t, data: "0x95d89b41" }, "latest"]).catch(() => null),
+            rpc("eth_call", [{ to: t, data: "0x06fdde03" }, "latest"]).catch(() => null),
+          ]);
+          const s = sym ? dec(["string"], sym) : null;
+          const n = nm ? dec(["string"], nm) : null;
+          label = (n || s) ? `${n || "?"} (${s || "?"})` : "未命名代币";
+        }
+        rows.push(`<div class="tok"><b>${label}</b>：${bal}<br><small>${t}</small></div>`);
+      } catch { rows.push(`<div class="hint">⚠️ ${t.slice(0, 10)}… 余额查询失败</div>`); }
+    }
+    box.innerHTML = rows.length
+      ? '<div class="hint">代币余额（登记簿 + 最近 4096 块链上扫描）：</div>' + rows.join("")
+      : '<div class="hint">该地址未发现任何 ERC-20 代币余额（可先到「代币」页发行/接收代币）。</div>';
+  } catch (e) {
+    box.innerHTML = "";
+    log("代币余额扫描失败: " + e.message, "err");
+  }
 }
 
 function useDevWallet() {

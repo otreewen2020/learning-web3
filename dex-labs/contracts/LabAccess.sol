@@ -117,7 +117,8 @@ contract LabVipToken is LabAccessControl {
 
     event Deposited(address indexed from, uint256 amount);
 
-    /// MINTER 或 PAUSER 都能恢复（真实项目通常只给 PAUSER，这里演示多角色重叠）
+    /// 只有 PAUSER 能暂停/恢复；教学上一人可同时兼任 MINTER+PAUSER（多角色重叠），
+    /// 真实项目通常只给 PAUSER 一个角色
     function setPaused(bool p) external onlyRole(PAUSER_ROLE) {
         paused = p;
         emit PausedSet(p);

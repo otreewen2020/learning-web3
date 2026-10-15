@@ -413,7 +413,7 @@
       <h2>质押流动性（ETH+代币 → 池 LP → 锁入金库）</h2>
       <div class="row">
         <div><label>投入 ETH</label><input id="lg-eth" type="number" value="0.1" step="0.01"></div>
-        <div><label>代币上限 maxToken（滑点保护）</label><input id="lg-maxtoken" type="number" value="220"></div>
+        <div><label>代币上限 maxToken（滑点保护）</label><input id="lg-maxtoken" type="number" value="" placeholder="留空=自动配对（推荐）"></div>
       </div>
       <div class="btns">
         <button class="act" id="btn-lg-stake">🔒 质押流动性（approve → addLiquidity 代持）</button>
@@ -545,6 +545,10 @@
         <div><label>下注金额（ETH，≥0.01）</label><input id="cs-amount" type="number" value="0.1" step="0.01"></div>
       </div>
       <button class="act" id="btn-cs-deploy">🏗️ 部署赌场（庄家注资开池）</button>
+      <div class="row" style="margin-top:12px">
+        <div><label>庄家续注金额（ETH）</label><input id="cs-topup" type="number" value="1" step="0.1"></div>
+      </div>
+      <button class="act ghost" id="btn-cs-topup">💰 庄家向赌池续注</button>
       <div class="hint" id="cs-info">尚未部署。赔率：开小(&lt;50) 1.98× / 开大(≥50) 1.96× / 押中数字(1%) 90×。</div>
     </div>
 

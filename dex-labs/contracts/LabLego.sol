@@ -141,21 +141,31 @@ contract LabLego {
     }
 
     /// @notice 质押流动性：本合约替用户向 AMM addLiquidity，LP 留合约内分户记账
-    /// @param maxToken 用户授权的代币上限（滑点保护；首注按此数量成交，
-    ///                 续注合约按池内比例只拉实际所需 needToken）
+    /// @param maxToken 首注 = 本次配币量（0 则取用户转入的全部代币）；
+    ///                 续注 = 滑点保护上限（合约按池内比例只拉实际所需量）
     function stakeLiquidity(uint256 maxToken) external payable {
         require(msg.value > 0, "no ETH");
-        require(maxToken > 0, "no token");
         uint256 needToken;
+        uint256 pull;
         if (IAMM(amm).totalLP() == 0) {
-            needToken = maxToken; // 首注：按用户给的 ETH/代币比例定价
+            // 首注：本合约是池子首位 LP，建仓代币来自用户本次转入——
+            // 先按用户额度拉币进金库，再全额转给 AMM 建仓；
+            // 传 0 表示"取用户当前全部代币余额作为配币量"（前端留空模式）
+            pull = maxToken;
+            if (pull == 0) {
+                pull = _balanceOf(msg.sender);
+                require(pull > 0, "no token");
+            }
+            needToken = pull;
         } else {
+            require(maxToken > 0, "no token");
             // 续注：按池内当前比例配对，maxToken 只作上限
             needToken = IAMM(amm).reserveToken() * msg.value / IAMM(amm).reserveETH();
             require(needToken > 0 && needToken <= maxToken, "slippage / ratio");
+            pull = needToken;
         }
-        // 用户 → 本合约 → 授权 AMM → AMM 从本合约拉走（AMM 的 transferFrom 对着 msg.sender=本合约）
-        IERC20(token).transferFrom(msg.sender, address(this), needToken);
+        IERC20(token).transferFrom(msg.sender, address(this), pull);
+        // 本合约 → 授权 AMM → AMM 从本合约拉走（AMM 的 transferFrom 对着 msg.sender=本合约）
         IERC20(token).approve(amm, needToken);
         uint256 lpBefore = IAMM(amm).lpOf(address(this));
         IAMM(amm).addLiquidity{value: msg.value}(needToken);
@@ -240,9 +250,13 @@ contract LabLego {
     // ── 内部工具 ──────────────────────────────────────────
 
     function _tokenBalance() internal view returns (uint256) {
+        return _balanceOf(address(this));
+    }
+
+    function _balanceOf(address a) internal view returns (uint256) {
         // 极简 ERC-20 余额查询（不占 ABI 面）
         (bool ok, bytes memory data) = token.staticcall(
-            abi.encodeWithSignature("balanceOf(address)", address(this))
+            abi.encodeWithSignature("balanceOf(address)", a)
         );
         require(ok, "balanceOf failed");
         return abi.decode(data, (uint256));

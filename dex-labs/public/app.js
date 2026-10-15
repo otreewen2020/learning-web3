@@ -73,6 +73,24 @@ async function waitReceipt(txHash, timeoutSec = 120) {
   throw new Error("等待回执超时");
 }
 
+// 广播 + 等回执 + 丢交易自动重发（仅限重发安全的交易：纯转账/approve/
+// fund/borrow/repay 等——重签时读最新 nonce，原笔若后被打包则后一笔因
+// 重复 nonce 直接被节点拒绝，不会重复执行；部署与 bet 不可重发
+// （bet 重发 = 二次下注），勿用此函数）
+async function sendRetry(fields, purpose, signer) {
+  const hash = await sendSigned(fields, signer);
+  recordTx(hash, purpose);
+  try {
+    return { hash, rc: await waitReceipt(hash) };
+  } catch (e) {
+    if (!/超时/.test(e.message)) throw e;
+    log(`  ${purpose} 2 分钟未上链（节点偶发丢交易），自动重发…`, "warn");
+    const hash2 = await sendSigned(fields, signer);
+    recordTx(hash2, purpose + "（重发）");
+    return { hash: hash2, rc: await waitReceipt(hash2) };
+  }
+}
+
 // 本地签名 + 直接广播的交易发送器（不经 ethers 事务流水线）
 // signer 可传任意 ethers.Wallet（预言机数据源用各自私钥报价）；默认用全局钱包
 async function sendSigned(txFields, signer = wallet) {
@@ -102,6 +120,27 @@ async function sendSigned(txFields, signer = wallet) {
     value,
   };
   const signed = await signer.signTransaction(tx);
+  // 广播前先本地模拟执行：目标合约 revert、EIP-3607 拒绝等错误在这里就能
+  // 拿到可读原因；若直接广播，Besu 执行失败时只给 gas 打满的 status=0，
+  // 前端完全看不出所以然（实测：向合约地址转账 revert 仅报"余额不足？"）
+  try {
+    await rpc("eth_call", [
+      { from: signer.address, to: txFields.to ?? null, data: tx.data, value: "0x" + BigInt(value).toString(16), gas: txFields.gasLimit },
+      "latest",
+    ]);
+  } catch (ce) {
+    const msg = String((ce.rpc && ce.rpc.message) || ce.message || "");
+    const idx = msg.toLowerCase().indexOf("08c379a0");
+    let reason = msg.slice(0, 140);
+    if (idx >= 0) {
+      try {
+        const hd = msg.slice(idx + 8);
+        const len = parseInt(hd.slice(64, 128), 16) * 2;
+        reason = window.ethers.toUtf8String("0x" + hd.slice(128, 128 + len));
+      } catch {}
+    }
+    throw new Error(`交易执行预检失败：${reason}`);
+  }
   const hash = await rpc("eth_sendRawTransaction", [signed]);
   return hash;
 }
@@ -856,7 +895,18 @@ async function erc20Approve(token, spender, amountHuman, purpose) {
   const hash = await sendSigned({ to: token, data, gasLimit: "200000", gasPrice: "1000000000" });
   recordTx(hash, purpose);
   log(`交易已广播: ${hash}，等待出块…`);
-  const rc = await waitReceipt(hash);
+  let rc;
+  try {
+    rc = await waitReceipt(hash);
+  } catch (e) {
+    // Besu 偶发丢交易：等待超时后重读 nonce 重签重发一次，避免后续交易
+    // 沿用旧 nonce 被顶替（approve 被吞、下一步扣款失败）
+    if (!/超时/.test(e.message)) throw e;
+    log("授权交易 2 分钟未上链（节点偶发丢交易），自动重发…", "warn");
+    const hash2 = await sendSigned({ to: token, data, gasLimit: "200000", gasPrice: "1000000000" });
+    recordTx(hash2, purpose + "（重发）");
+    rc = await waitReceipt(hash2);
+  }
   const ok = Number(rc.status) === 1;
   settleTx(hash, ok, Number(rc.blockNumber));
   if (!ok) throw new Error("approve 回执 status=0");
@@ -1865,6 +1915,16 @@ const gSEL = { // 选择器现算
 };
 const TOKEN_TRANSFER = "0xa9059cbb"; // transfer(address,uint256) 稳定选择器
 
+// 池子是否还没有流动性（vault.amm() → AMM.totalLP()）
+async function legoPoolEmpty(vault) {
+  try {
+    const ammRet = await rpc("eth_call", [{ to: vault, data: window.ethers.id("amm()").slice(0, 10) }, "latest"]);
+    const amm = "0x" + ammRet.slice(26);
+    const lp = await rpc("eth_call", [{ to: amm, data: window.ethers.id("totalLP()").slice(0, 10) }, "latest"]);
+    return BigInt(lp === "0x" ? "0" : lp) === 0n;
+  } catch { return true; }
+}
+
 // 部署金库（token, amm, oracle, rate=每秒1%演示）→ approve → fund
 async function legoSetup() {
   if (!wallet) return log("请先加载账户", "err");
@@ -1910,7 +1970,13 @@ async function legoSetup() {
     const rc = await waitReceipt(hash);
     settleTx(hash, Number(rc.status) === 1, Number(rc.blockNumber));
     if (Number(rc.status) !== 1) throw new Error("fund 回执 status=0");
-    log(`✅ 可借资金注入完成（区块 ${Number(rc.blockNumber)}）`, "ok");
+    // 验证资金确实到账：tokenPool 必须 ≥ 本次注入量，否则后续借款必 "pool empty"
+    const tpRet = await rpc("eth_call", [{ to: vault, data: gSEL.tokenPool() }, "latest"]);
+    const tpNow = BigInt(tpRet === "0x" ? "0" : tpRet);
+    if (tpNow < window.ethers.parseUnits(String(fundAmt))) {
+      throw new Error(`注入未生效（可借池仅 ${window.ethers.formatEther(tpNow)}），请重新点「一键准备」补注入`);
+    }
+    log(`✅ 可借资金注入完成，当前可借池 ${window.ethers.formatEther(tpNow)}（区块 ${Number(rc.blockNumber)}）`, "ok");
     refreshLego();
   } catch (e) {
     log("❌ 部署/注入失败: " + (e.shortMessage || e.message), "err");
@@ -1926,15 +1992,26 @@ async function legoStake() {
   const vault = getLegoVault(token);
   if (!vault) return log("请先部署金库", "err");
   const ethAmt = Number($("lg-eth").value);
-  const maxToken = Number($("lg-maxtoken").value);
-  if (!(ethAmt > 0) || !(maxToken > 0)) return log("请填写 ETH 与代币上限", "err");
+  const maxTokRaw = $("lg-maxtoken").value.trim();
+  const maxToken = maxTokRaw === "" ? 0 : Number(maxTokRaw);
+  if (!(ethAmt > 0) || (!Number.isFinite(maxToken) || maxToken < 0)) return log("请填写 ETH；代币上限留空或填正数", "err");
   const btn = $("btn-lg-stake");
   btn.disabled = true;
   try {
-    await erc20Approve(token, vault, maxToken, "授权金库代拉代币");
+    // 留空（maxToken=0）= 首注自动配对：用链上代币余额作为拉币量并授权。
+    // 注意：续注（池子已有储备）必须填正上限，合约会拒绝 maxToken=0
+    const isFresh = await legoPoolEmpty(vault);
+    let pullAmt = maxToken;
+    if (maxToken === 0) {
+      if (!isFresh) throw new Error("池子已有流动性，续注请填代币上限（滑点保护）");
+      const ret = await rpc("eth_call", [{ to: token, data: "0x70a08231" + window.ethers.AbiCoder.defaultAbiCoder().encode(["address"], [wallet.address]).slice(2) }, "latest"]);
+      pullAmt = BigInt(ret === "0x" ? "0" : ret);
+      if (pullAmt === 0n) throw new Error("账户代币余额为 0，无法自动配对建仓");
+    }
+    await erc20Approve(token, vault, pullAmt, "授权金库代拉代币");
     const enc = window.ethers.AbiCoder.defaultAbiCoder();
-    const data = gSEL.stakeLiquidity() + enc.encode(["uint256"], [window.ethers.parseUnits(String(maxToken))]).slice(2);
-    log(`质押流动性 ${ethAmt} ETH + ≤${maxToken} 代币（金库代向 AMM 建仓）…`);
+    const data = gSEL.stakeLiquidity() + enc.encode(["uint256"], [BigInt(maxToken) ? window.ethers.parseUnits(String(maxToken)) : 0n]).slice(2);
+    log(`质押流动性 ${ethAmt} ETH（金库代向 AMM 建仓${maxToken > 0 ? `，代币上限 ${maxToken}` : `，代币取余额 ${window.ethers.formatEther(pullAmt)} 全额配币`}）…`);
     const hash = await sendSigned({
       to: vault, data, gasLimit: "1500000", gasPrice: "1000000000",
       value: window.ethers.parseEther(String(ethAmt)),
@@ -1942,7 +2019,7 @@ async function legoStake() {
     recordTx(hash, `质押流动性 ${ethAmt} ETH`);
     const rc = await waitReceipt(hash);
     settleTx(hash, Number(rc.status) === 1, Number(rc.blockNumber));
-    if (Number(rc.status) !== 1) throw new Error("stakeLiquidity 回执 status=0（代币不足/滑点？）");
+    if (Number(rc.status) !== 1) throw new Error("stakeLiquidity 回执 status=0（余额不足/滑点/池子状态变化？）");
     log(`✅ LP 已锁入金库（区块 ${Number(rc.blockNumber)}）`, "ok");
     refreshLego();
     refreshBalance();
@@ -1965,6 +2042,29 @@ async function legoBorrow() {
   try {
     const enc = window.ethers.AbiCoder.defaultAbiCoder();
     const data = gSEL.borrow() + enc.encode(["uint256"], [window.ethers.parseUnits(String(amt))]).slice(2);
+    // 预检：把合约 revert 原因翻译成具体提示
+    try {
+      await rpc("eth_call", [{ from: wallet.address, to: vault, data }, "latest"]);
+    } catch (pe) {
+      const msg = String((pe && pe.error && pe.error.message) || (pe && pe.message) || "");
+      const idx = msg.toLowerCase().indexOf("08c379a");
+      if (idx >= 0) {
+        try {
+          const h = msg.slice(idx + 8);
+          const len = parseInt(h.slice(64, 128), 16) * 2;
+          const reason = window.ethers.toUtf8String("0x" + h.slice(128, 128 + len));
+          if (reason.includes("under collateral")) {
+            throw new Error("超出抵押购买力——请先「质押流动性」建仓，再按 maxBorrow 的 60% 以内借款");
+          } else if (reason.includes("pool empty")) {
+            throw new Error("金库代币池已空——请管理员到上方「注入可借资金」重新 fund 注资（此前的注入可能被节点丢交易）");
+          }
+          throw new Error("借款被合约拒绝: " + reason);
+        } catch (e2) {
+          if (e2.message && /借款|超出|金库/.test(e2.message)) throw e2;
+        }
+      }
+      throw new Error("借款预检失败: " + msg.slice(0, 120));
+    }
     const hash = await sendSigned({ to: vault, data, gasLimit: "500000", gasPrice: "1000000000" });
     recordTx(hash, `金库借款 ${amt}`);
     const rc = await waitReceipt(hash);
@@ -1996,7 +2096,12 @@ async function legoRepay() {
     const repayAmt = debt * 2n; // 出块期间利息在涨，2 倍超额授权+还款
     log(`当前债务 ${window.ethers.formatEther(debt)}，超额授权并还款…`);
     await erc20Approve(token, vault, window.ethers.formatEther(repayAmt), "授权金库扣款");
-    const data = gSEL.repay() + enc.encode(["uint256"], [repayAmt]).slice(2);
+    // 授权后重读债务：repay 金额必须 ≥ 执行时刻的债务（rate=1e16 时出块间隔利息可达数十枚）
+    const ret2 = await rpc("eth_call", [{
+      to: vault, data: gSEL.debtOf() + enc.encode(["address"], [wallet.address]).slice(2),
+    }, "latest"]);
+    const debtNow = BigInt(ret2 === "0x" ? 0 : ret2);
+    const data = gSEL.repay() + enc.encode(["uint256"], [debtNow > repayAmt ? repayAmt : debtNow]).slice(2);
     const hash = await sendSigned({ to: vault, data, gasLimit: "500000", gasPrice: "1000000000" });
     recordTx(hash, "还清金库借款");
     const rc = await waitReceipt(hash);
@@ -2622,20 +2727,31 @@ async function csDeploy() {
     if (!wallet) { log("请先加载账户", "err"); return; }
     if (!csData) csData = await fetch("/casino").then((r) => r.json());
     const seed = window.ethers.parseEther(String(Number($("cs-seed").value) || 1.2));
-    log("部署赌场（庄家注资 " + window.ethers.formatEther(seed) + " ETH）…");
-    const hash = await sendSigned({ data: csData.bytecode, gasLimit: csData.gasLimit, gasPrice: csData.gasPrice });
+    log("部署赌场（部署即开池，庄家注资 " + window.ethers.formatEther(seed) + " ETH）…");
+    // constructor{value} 一步到位：注资与部署原子绑定，杜绝"部署成功但注资
+    // 丢交易"产生 0 赌池赌场（Besu 偶发丢交易，此前两次事故的共同根因）
+    const hash = await sendSigned({ data: csData.bytecode, gasLimit: csData.gasLimit, gasPrice: csData.gasPrice, value: seed });
     recordTx(hash, "部署链上赌场");
     log("  已广播，等出块…");
-    const rc = await waitReceipt(hash);
+    let rc;
+    try {
+      rc = await waitReceipt(hash);
+    } catch (e) {
+      // 部署广播后超时：交易可能仍在池内即将出块，也可能已被 Besu 丢弃。
+      // 此时既不能登记赌场，也不能重发（原交易若随后落地会产生第二个赌场），
+      // 只能提示稍后核实。
+      throw new Error("部署交易 2 分钟未上链（节点偶发丢交易）——请稍后刷新页面核实交易是否落地，再决定是否重试部署");
+    }
     settleTx(hash, Number(rc.status) === 1, Number(rc.blockNumber));
     if (Number(rc.status) !== 1) throw new Error("部署 status=0");
     localStorage.setItem(CSKEY, JSON.stringify({ addr: rc.contractAddress }));
-    // 部署成功后单独注资开池（receive() 直接进赌池）
+    // 到账验证：赌池必须 ≥ 注资额
     if (seed > 0n) {
-      log("庄家注资 " + window.ethers.formatEther(seed) + " ETH 开池…");
-      const h2 = await sendSigned({ to: rc.contractAddress, value: seed, gasLimit: "21000" });
-      const rc2 = await waitReceipt(h2);
-      settleTx(h2, Number(rc2.status) === 1, Number(rc2.blockNumber));
+      const house = BigInt(await rpcOnce("eth_getBalance", rc.contractAddress, "latest"));
+      if (house < seed) {
+        localStorage.removeItem(CSKEY);
+        throw new Error(`注资到账异常（赌池仅 ${window.ethers.formatEther(house)} ETH），请重试部署`);
+      }
     }
     $("cs-info").textContent = "赌场地址：" + rc.contractAddress;
     log("✅ 赌场开业（区块 " + Number(rc.blockNumber) + "），下注后等 3 个区块开奖", "ok");
@@ -2651,6 +2767,11 @@ async function csBet() {
   const choice = Number($("cs-choice").value);
   const guess = Number($("cs-guess").value) || 0;
   if (amount < window.ethers.parseEther("0.01")) return log("最少 0.01 ETH", "err");
+  // 预检：账户 ETH 是否够下注 + gas
+  const bal = BigInt(await rpcOnce("eth_getBalance", wallet.address, "latest"));
+  if (bal < amount + window.ethers.parseEther("0.001")) {
+    return log(`账户余额仅 ${window.ethers.formatEther(bal)} ETH，不足以支付下注 ${window.ethers.formatEther(amount)} + gas`, "err");
+  }
   const enc = window.ethers.AbiCoder.defaultAbiCoder();
   const btn = $("btn-cs-bet");
   btn.disabled = true;
@@ -2680,6 +2801,17 @@ async function csReveal() {
     if (!info) return log("注单不存在", "err");
     if (info.revealed) return log(`注单 #${id} 已开过：${info.won ? "赢" : "输"}，点数 ${info.result}`, "warn");
     if (!info.canReveal) return log(`seed 区块 ${info.seedBlock} 还没成为历史（当前区块不够），再等等`, "warn");
+    // 预检：本注单若中奖，赌池须付得起彩金（house broke 提前拦截）
+    const payOdds = [198n, 196n, 9000n][info.choice];
+    const payout = (info.amount * payOdds) / 100n;
+    const willWin = await csSimReveal(c.addr, id, info);
+    if (willWin === null) return log("无法读取 seed 区块哈希（可能已超过 256 块），无法预判，请直接在页面上尝试开奖", "warn");
+    if (willWin) {
+      const house = BigInt(await csCall(c.addr, csSEL.houseBalance()));
+      if (house < payout) {
+        return log(`本注单会中奖（彩金 ${window.ethers.formatEther(payout)} ETH），但赌池只有 ${window.ethers.formatEther(house)} ETH——请庄家先向赌场地址转入 ETH 再开奖`, "err");
+      }
+    }
     const { hash, rc } = await csSend(c.addr, csSEL.reveal() + enc.encode(["uint256"], [id]).slice(2), 300000);
     recordTx(hash, `开注单 #${id}`);
     settleTx(hash, true, Number(rc.blockNumber));
@@ -2692,13 +2824,39 @@ async function csReveal() {
   finally { btn.disabled = false; }
 }
 
+// 庄家续注：纯转账到赌场地址（receive() 进赌池）。
+// 纯转账重发安全，走 sendRetry（Besu 丢交易自动重发）
+async function csTopup() {
+  const c = getCs();
+  if (!c) return log("请先部署赌场", "err");
+  const amt = window.ethers.parseEther(String(Number($("cs-topup").value) || 0));
+  if (amt <= 0n) return log("请填写续注金额", "err");
+  const btn = $("btn-cs-topup");
+  btn.disabled = true;
+  try {
+    log(`庄家向 ${c.addr.slice(0, 10)}… 续注 ${window.ethers.formatEther(amt)} ETH…`);
+    const { hash, rc } = await sendRetry({ to: c.addr, value: amt, gasLimit: "21000" }, "庄家续注");
+    settleTx(hash, Number(rc.status) === 1, Number(rc.blockNumber));
+    if (Number(rc.status) !== 1) throw new Error("续注回执 status=0");
+    log(`✅ 续注成功（区块 ${Number(rc.blockNumber)}）`, "ok");
+    refreshCasino();
+  } catch (e) { log("❌ 续注失败: " + (e.shortMessage || e.message), "err"); }
+  finally { btn.disabled = false; }
+}
+
 async function csCall(to, data) {
   const ret = await rpc("eth_call", [{ to, data }, "latest"]);
   return ret === "0x" || ret === undefined ? null : ret;
 }
 async function csSend(to, data, gasLimit, value) {
+  // bet 重发 = 二次下注，不能走 sendRetry；超时给出明确核实指引
   const hash = await sendSigned({ to, data, gasLimit: String(gasLimit), gasPrice: "1000000000", value });
-  const rc = await waitReceipt(hash);
+  let rc;
+  try {
+    rc = await waitReceipt(hash);
+  } catch (e) {
+    throw new Error("交易 2 分钟未上链（节点偶发丢交易）——请勿重复提交，稍后用「查询注单」核实是否已入账，再决定是否重试");
+  }
   if (Number(rc.status) !== 1) {
     const sim = await fetch(RPC_ABS, {
       method: "POST",
@@ -2721,6 +2879,18 @@ async function csBetInfo(addr, id) {
   const d = enc.decode(
     ["address", "uint256", "uint8", "uint8", "uint256", "bool", "bool", "uint256", "bool"], r);
   return { player: d[0], amount: d[1], choice: Number(d[2]), guess: Number(d[3]), seedBlock: d[4], revealed: d[5], won: d[6], result: d[7], canReveal: d[8] };
+}
+
+// 链下模拟 reveal：读 seedBlock 哈希算出 result，判断本注单是否中奖
+async function csSimReveal(addr, id, info) {
+  try {
+    const h = await rpcOnce("eth_getBlockByNumber", "0x" + BigInt(info.seedBlock).toString(16), false);
+    if (!h || !h.hash) return null; // 区块还未来 / 已滚出窗口 → 无法预判
+    const result = BigInt(h.hash) % 100n;
+    if (info.choice === 0) return result < 50n;
+    if (info.choice === 1) return result >= 50n;
+    return result === BigInt(info.guess);
+  } catch { return null; }
 }
 
 async function refreshCasino() {
@@ -3320,6 +3490,7 @@ $("btn-gv-refresh").onclick = () => { refreshGov(); log("治理状态已刷新")
 $("btn-cs-deploy").onclick = csDeploy;
 $("btn-cs-bet").onclick = csBet;
 $("btn-cs-reveal").onclick = csReveal;
+$("btn-cs-topup").onclick = csTopup;
 $("cs-bid").onchange = () => refreshCasino();
 $("btn-ac-deploy").onclick = acDeploy;
 $("btn-ac-hire").onclick = acHire;

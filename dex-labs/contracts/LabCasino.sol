@@ -39,6 +39,7 @@ contract LabCasino {
         uint8 choice;     // 0 solo / 1 pair / 2 exact
         uint8 exactGuess; // choice==2 时的猜测数字 0-99
         uint256 seedBlock; // 承诺的开奖区块（下注块 + SEED_DELAY）
+        uint256 seed;     // 兑现的种子（seedBlock 区块哈希），reveal 时惰性锁定
         bool revealed;
         bool won;
     }
@@ -93,6 +94,7 @@ contract LabCasino {
             choice: choice,
             exactGuess: exactGuess,
             seedBlock: block.number + SEED_DELAY,
+            seed: 0,
             revealed: false,
             won: false
         });
@@ -101,14 +103,23 @@ contract LabCasino {
     }
 
     /// 开奖：必须在 seedBlock 之后（seedBlock 已成历史，blockhash 才可读）
+    ///
+    /// 注意 EVM 只保留最近 256 个区块哈希：若注单放置超过 256 块仍未兑现，
+    /// blockhash(seedBlock) 会返回 0。此时允许任何人在窗口内（seedBlock < now <= seedBlock+256）
+    /// 先把种子兑现到 b.seed（惰性兑现，兑现本身不决定输赢），之后仅凭已锁定的 b.seed 开奖，
+    /// 保证过期注单仍可结算，且种子一旦上链不可篡改。
     function reveal(uint256 id) external notPaused {
         Bet storage b = bets[id];
         require(b.player != address(0), "no bet");
         require(!b.revealed, "revealed");
         require(block.number > b.seedBlock, "seed not ready");
-        bytes32 h = blockhash(b.seedBlock);
-        require(uint256(h) != 0, "hash unavailable"); // 超 256 区块旧哈希为 0
-        uint256 result = uint256(h) % 100;
+
+        if (b.seed == 0) {
+            bytes32 h = blockhash(b.seedBlock);
+            require(uint256(h) != 0, "hash unavailable"); // 仅在 >256 块且尚未兑现时发生
+            b.seed = uint256(h);
+        }
+        uint256 result = b.seed % 100;
 
         bool won;
         uint256 odds;
@@ -163,8 +174,8 @@ contract LabCasino {
         revealed = b.revealed;
         won = b.won;
         canReveal = !b.revealed && b.player != address(0) && block.number > b.seedBlock;
-        if (revealed && seedBlock + 1 <= block.number && block.number <= seedBlock + 256) {
-            result = uint256(blockhash(seedBlock)) % 100;
+        if (revealed && b.seed != 0) {
+            result = b.seed % 100;
         }
     }
 

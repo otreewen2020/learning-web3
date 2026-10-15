@@ -140,31 +140,74 @@ contract LabLego {
         emit Funded(amount);
     }
 
+    /// @notice 版本特征：新版（支持自动配对注入）才有此函数，前端据此探测
+    ///         返回值 2 = repay 按执行时刻债务全额清偿（1 = 旧版部分还款 bug）
+    function automintEnabled() external pure returns (uint256) {
+        return 2;
+    }
+
+    /// @notice 还款（需先 approve）：不传参数，直接还清执行时刻的全部债务。
+    ///         高额利率下授权与上链之间利息仍在涨，金额型 repay 会因
+    ///         "还少了→按部分还款规则重计本金" 而永远还不清，故提供此函数。
+    function repayAll() external {
+        uint256 debt = debtOf(msg.sender);
+        require(debt > 0, "nothing to repay");
+        IERC20(token).transferFrom(msg.sender, address(this), debt);
+        tokenPool += debt;
+        principalOf[msg.sender] = 0;
+        emit Repaid(msg.sender, debt);
+    }
+
+    /// @notice LP 记账归属检查：无未还债务且无 LP 记录时，允许认领
+    ///         AMM 中属于本金库的 LP（修复早期版本 stake 记账缺失遗留）
+    function claimLp() external {
+        require(principalOf[msg.sender] == 0, "has debt");
+        require(lpCollateral[msg.sender] == 0, "has lp");
+        require(IAMM(amm).lpOf(msg.sender) == 0, "own lp first");
+        uint256 mine = IAMM(amm).lpOf(address(this));
+        require(mine > 0, "nothing to claim");
+        lpCollateral[msg.sender] = mine;
+        emit Staked(msg.sender, 0, 0, mine);
+    }
+
     /// @notice 质押流动性：本合约替用户向 AMM addLiquidity，LP 留合约内分户记账
-    /// @param maxToken 首注 = 本次配币量（0 则取用户转入的全部代币）；
+    /// @param maxToken 首注 = 本次配币量（0 则取金库当前全部代币余额建仓，
+    ///                 建仓后剩余自动转入 tokenPool 作为可借资金——配合前端
+    ///                 "预留注入量"模式一步完成建仓+注资）；
     ///                 续注 = 滑点保护上限（合约按池内比例只拉实际所需量）
     function stakeLiquidity(uint256 maxToken) external payable {
         require(msg.value > 0, "no ETH");
         uint256 needToken;
         uint256 pull;
-        if (IAMM(amm).totalLP() == 0) {
-            // 首注：本合约是池子首位 LP，建仓代币来自用户本次转入——
-            // 先按用户额度拉币进金库，再全额转给 AMM 建仓；
-            // 传 0 表示"取用户当前全部代币余额作为配币量"（前端留空模式）
-            pull = maxToken;
-            if (pull == 0) {
-                pull = _balanceOf(msg.sender);
-                require(pull > 0, "no token");
+        bool first = IAMM(amm).totalLP() == 0;
+        if (first) {
+            // 首注：本合约是池子首位 LP。maxToken=0（前端留空自动模式）=
+            // 金库里的全部代币余额（用户先 approve 转入预留量）全部建仓，
+            // 建仓后剩余自动注入可借池；maxToken>0 = 先从用户拉该额度再建仓。
+            uint256 mine = _balanceOf(address(this));
+            if (maxToken == 0) {
+                // 金库余额不够时，把用户授权额度内的部分先拉进来再建仓
+                if (mine < 2) {
+                    uint256 fromUser = _balanceOf(msg.sender);
+                    require(fromUser > 0, "no token");
+                    IERC20(token).transferFrom(msg.sender, address(this), fromUser);
+                    mine += fromUser;
+                }
+                require(mine > 0, "no token");
+                needToken = mine;
+            } else {
+                pull = maxToken;
+                needToken = pull;
+                IERC20(token).transferFrom(msg.sender, address(this), pull);
             }
-            needToken = pull;
         } else {
             require(maxToken > 0, "no token");
             // 续注：按池内当前比例配对，maxToken 只作上限
             needToken = IAMM(amm).reserveToken() * msg.value / IAMM(amm).reserveETH();
             require(needToken > 0 && needToken <= maxToken, "slippage / ratio");
             pull = needToken;
+            IERC20(token).transferFrom(msg.sender, address(this), pull);
         }
-        IERC20(token).transferFrom(msg.sender, address(this), pull);
         // 本合约 → 授权 AMM → AMM 从本合约拉走（AMM 的 transferFrom 对着 msg.sender=本合约）
         IERC20(token).approve(amm, needToken);
         uint256 lpBefore = IAMM(amm).lpOf(address(this));
@@ -172,6 +215,14 @@ contract LabLego {
         uint256 got = IAMM(amm).lpOf(address(this)) - lpBefore;
         require(got > 0, "no LP minted");
         lpCollateral[msg.sender] += got;
+        // 首注留空模式：建仓后金库剩余的代币（= 用户预留的注入量）自动入可借池
+        if (first) {
+            uint256 leftover = _tokenBalance();
+            if (leftover > 0) {
+                tokenPool += leftover;
+                emit Funded(leftover);
+            }
+        }
         emit Staked(msg.sender, msg.value, needToken, got);
     }
 

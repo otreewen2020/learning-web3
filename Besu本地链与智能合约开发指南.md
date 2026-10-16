@@ -1,4 +1,6 @@
-# Besu 本地链与智能合约开发指南（小白版）
+# Besu 本地链与智能合约开发指南
+
+**作者：Alex@X&Y Foundation & StarLeader Tech.**
 
 > 本指南由《Besu本地链搭建指南.md》与《智能合约入门指南.md》合并整理而成，
 > 完整覆盖“搭建 Besu 本地链 → 理解智能合约 → 实战开发十二种合约”的学习路径，
@@ -63,7 +65,7 @@
   - [专题 05：DEX 自动做市商（LabAMM）](#专题-05dex-自动做市商labamm)
   - [专题 06：借贷协议（LabLending）](#专题-06借贷协议lablending)
   - [专题 07：预言机（LabOracle）](#专题-07预言机laboracle)
-  - [专题 08：DeFi 乐高地基（LabLego）](#专题-08defi-乐高地基lablego)
+  - [专题 08：金库（LabLego）](#专题-08defi-金库 lablego)
   - [专题 09：链上治理四件套（VoteToken / Governor / Timelock / Box）](#专题-09链上治理四件套votetoken--governor--timelock--box)
   - [专题 10：博彩（LabCasino）](#专题-10博彩labcasino)
   - [专题 11：身份与权限（LabAccessControl + LabVipToken）](#专题-11身份与权限labaccesscontrol--labviptoken)
@@ -1824,11 +1826,63 @@ Besu 节点 8545（Clique PoA，15 秒出块）
 
 与 LabToken 同思路：不依赖 OpenZeppelin，手写精简 ERC-721 看清本质。
 
+#### 22.1.1 EIP-721 规范接口全貌
+
+```solidity
+interface IERC721 {
+    // ── 事件 ──
+    event Transfer(address indexed from, address indexed to, uint256 indexed tokenId);
+    event Approval(address indexed owner, address indexed approved, uint256 indexed tokenId);
+    event ApprovalForAll(address indexed owner, address indexed operator, bool approved);
+
+    // ── 必选 ──
+    function balanceOf(address owner) external view returns (uint256);
+    function ownerOf(uint256 tokenId) external view returns (address);
+    function safeTransferFrom(address from, address to, uint256 tokenId, bytes calldata data);
+    function transferFrom(address from, address to, uint256 tokenId);
+    function approve(address to, uint256 tokenId);
+    function setApprovalForAll(address operator, bool approved);
+    function getApproved(uint256 tokenId) external view returns (address);
+    function isApprovedForAll(address owner, address operator) external view returns (bool);
+
+    // ── 可选：ERC165 接口探测 ──
+    function supportsInterface(bytes4 interfaceId) external view returns (bool);
+}
+```
+
+三种权属关系的分工：
+
+| 层级 | 函数 | 语义 |
+|---|---|---|
+| 所有者 | `ownerOf` | 谁是 NFT 的主人（唯一） |
+| 单币授权 | `approve(to, tokenId)` | 允许某地址操作**这一个**代币（典型：挂单后市场合约划走） |
+| 全量授权 | `setApprovalForAll(operator, true)` | 允许某操作者管理我的**所有** NFT（典型：OpenSea 一键授权） |
+
+注意与 ERC-20 的语义差异：ERC-20 的 `approve` 是按金额授权余额，ERC-721 是按 **tokenId 逐个**授权，且转账必须由"被授权人"执行 `transferFrom`。
+
+**safeTransferFrom 与 Receiver 钩子**：safe 版转账后回调目标地址的 `onERC721Received(operator, from, tokenId, data)`，若目标是合约却没实现该钩子（返回值不是 magic value `0x150b7a02`），整笔回滚——**防止 NFT 转进没有取回功能的合约里永久丢失**。市场/金库类合约都必须实现 `IERC721Receiver`。普通 `transferFrom` 不做检查，效率略高但可能转入黑洞地址。
+
+**元数据面**（可选扩展）：`name()` / `symbol()` / `tokenURI(tokenId)`。`tokenURI` 指向 JSON（`{name, image, attributes}`）；标准不要求图片上链，通常链上只存指针、图片放 IPFS——这是 NFT"图片会不会消失"的根源。LabNFT 用 `data:application/json,{...}` 内联方案，JSON 永久存链，无指针失效问题（代价是每枚 mint 的 calldata/存储 gas 更高）。
+
+**常用扩展标准**：
+
+| 标准 | 增补 |
+|---|---|
+| ERC-721Enumerable | `totalSupply()`、按索引枚举某地址的 NFT（钱包展示用，gas 贵） |
+| ERC-721Burnable | `burn(tokenId)`（销毁即 owner 校验） |
+| ERC-4907 | 可租 NFT：`expiresFor(tokenId)`，限时授权使用 |
+| ERC-6551 | 每个 NFT 绑定一个智能合约钱包（TBA） |
+
+#### 22.1.2 与 ERC-20 心智对照
+
 | ERC-20（同质化） | ERC-721（非同质化） |
 |---|---|
 | `balanceOf` = 一个数字 | 每枚藏品独立存在，`ownerOf(tokenId)` 逐枚确权 |
 | 转账 = 两个数字加减 | `transferFrom(from, to, tokenId)` 逐枚转手 |
 | 无"编号"概念 | `tokenId` 全局唯一，是藏品身份本身 |
+| 授权 = 地址 + 金额 | 授权 = tokenId / 全量开关 |
+| 余额一个数查完 | 枚举清单需 Enumerable |
+| 转账无防呆 | safeTransferFrom + Receiver 钩子 |
 
 核心存储：
 
@@ -1850,6 +1904,88 @@ mapping(address => mapping(address => bool)) public isApprovedForAll; // 全量�
   `setApprovalForAll(operator, true)` 全量授权（OpenSea 挂单即此机制）；
 - **转手后旧授权自动失效**：`delete getApproved[tokenId]`，
   这是安全细节。
+
+#### 22.1.3 EIP-721 逐项精解（每个事件/函数要实现什么）
+
+规范核心思想：**ERC-721 = 三张账本（谁有几枚 / 每枚归谁 / 谁能代转）+ 三个广播（所有权变了、单枚授权变了、全量授权变了）**。以下每条都对照 LabNFT.sol 标注实现情况。
+
+**事件（3 个）——链下世界的"公告栏"**
+
+事件不存储任何东西，唯一职责是让链下（钱包/市场/浏览器）不用扫全链就能跟上状态。`indexed` 参数写进日志 topic，RPC 可按主题过滤。
+
+**① `Transfer(from, to, tokenId)`** —— 每当一枚 NFT 所有权变化就发：**铸造**（`from = 0x0`）、**转手**、**销毁**（`to = 0x0`）。
+
+```solidity
+emit Transfer(address(0), to, id);    // 铸造：0 → 有 = 凭空诞生（EIP 约定）
+emit Transfer(from, to, tokenId);     // 转手
+```
+
+三个参数全部 indexed（规范强制），因此：钱包按 `to=我` 过滤查"我收到过什么"；市场按 `tokenId` 过滤查"这枚的历史成交"；**链上确权可以完全不信合约 mapping、只按事件流重放推算**——NFT 页「查询收到的 NFT」正是这么实现的。规范措辞 MUST：不发 Transfer 事件视为违反标准，会在所有钱包和市场"查无此币"。
+
+**② `Approval(owner, approved, tokenId)`** —— 单枚授权设立/变更时广播。注意主语是**持有人**（不是调用者——持有人授权、被授权人执行）。两个隐含义务：撤销授权（`approve(0x0, id)`）也要发；新版规范要求**转手隐式撤销时也要补发** `Approval(owner, 0, id)`——LabNFT 只 `delete` 未补发事件，是教学版已知差异。
+
+**③ `ApprovalForAll(owner, operator, approved)`** —— 全量授权开关切换时广播（开、关都发）。`approved` 是 bool **不 indexed**（放 data 里，过滤需求按 owner 一个 topic 足够）。钱包里"你正在授权 OpenSea 管理全部藏品"的警告列表就是扫这个事件。
+
+**必选函数（8 个）**
+
+**④ `balanceOf(owner)`** —— 某地址当前持有的数量。查 `_balances[owner]`。规范：owner 为零地址时 MUST revert（传错就该报错，不许返回 0 掩盖）。维护义务：每次 mint/transfer/burn 同步加减，与 `_owners` 永远自洽（Σ balances = 总流通量）。
+
+**⑤ `ownerOf(tokenId)`** —— 某枚的当前持有人，**ERC-721 的灵魂函数**，"确权"就是它。规范：tokenId 不存在（未铸/已销毁）时 MUST revert，绝不返回零地址——"不存在"与"属于零地址"必须可区分。LabNFT 的 `require(_owners[tokenId] != address(0), "token not exist")` 即此义务。
+
+**⑥ `transferFrom(from, to, tokenId)`** —— 把 from 名下 tokenId 转给 to；调用者不是 from 时必须持有有效授权。检查清单（每条 MUST）：
+
+| 检查 | 不满足时 | LabNFT 对应 |
+|---|---|---|
+| caller 是 owner、或该枚被授权者、或全量操作员 | revert | `not allowed` 三选一 |
+| from 确实持有该枚 | revert | `require(_owners[tokenId] == from)` |
+| to 非零地址 | revert | `require(to != address(0))` |
+| 成功后发 Transfer | — | `emit Transfer(from, to, tokenId)` |
+| **成功后清除该枚的单枚授权** | — | `delete getApproved[tokenId]` |
+
+最后一条最易漏也最重要：**转手即翻篇**——上一任的授权对新主人不作数，防止"卖出的 NFT 还能被前买家挂单合约转走"的事故。
+
+**⑦ `safeTransferFrom(from, to, tokenId, data)`** —— transferFrom 全部逻辑 + **接收方能力探测**：转完后若 to 是合约，调用 `to.onERC721Received(msg.sender, from, tokenId, data)`，返回值不是 magic value `0x150b7a02` 则**整笔回滚**。设计动机：NFT 只有一枚，转进没有提取功能的合约 = 孤本永久锁死；safe 版把"接收方确认能收"变成协议级保证。`data` 透传给 Receiver（市场用它携带订单信息实现"收款即成交"）。只对合约生效（EOA 的 `extcodesize==0` 跳过）。规范要求还有个不带 data 的重载。**LabNFT 未实现**（教学精简，第二个已知差异）。
+
+**⑧ `approve(to, tokenId)`** —— 持有人授权某地址转走这一枚。细节：只有 owner 或全量操作员能调；to 不得等于 owner；**单枚授权同时只有一份**，再次 approve 直接覆盖（比 ERC-20 allowance 安全的一点：没有额度叠加问题）；撤销 = `approve(address(0), tokenId)`；发 Approval。
+
+**⑨ `setApprovalForAll(operator, bool)`** —— 名下**全部** NFT（现在的和将来的）打包授权。operator 不得等于自己（MUST revert）。**语义是持续性的**：授权后新铸/新转入的同样在范围内——这是它与 approve 的本质区别，也是危险所在（一键授权市场后，以后进的藏品也全都能被市场合约转走，取消要记得调 false）。
+
+**⑩ `getApproved(tokenId)`** —— 查某枚当前的单枚被授权人（无则零地址）；tokenId 不存在 MUST revert。市场撮合前的标准检查："确认 #42 当前 approve 给了本市场，才敢 transferFrom"。
+
+**⑪ `isApprovedForAll(owner, operator)`** —— 查持有人是否把全部资产授权给了某操作者。纯查询，供 transferFrom 内部判断与前端显示授权状态。
+
+**可选函数：`supportsInterface`（ERC-165）**
+
+让合约回答"你实现了哪个接口"，`interfaceId` 是接口所有函数选择器的**异或值**。为什么需要：市场对接各种合约时，合约调合约 revert 会连带回滚整笔交易，**没法"试调用"探测**，必须有 ERC-165 这种主动声明机制。常见 id：
+
+```
+0x01ffc9a7  ERC-165 自身（实现了就必须认这个）
+0x80ac58cd  ERC-721
+0x5b5e139f  ERC-721 Metadata（name/symbol/tokenURI）
+0x780e9d63  ERC-721 Enumerable
+```
+
+**规范之外的"事实标准"义务（容易漏）**
+
+1. **没有 `transfer(to, tokenId)`**：所有转账都是"从某人名下转出"的三角模式，有意设计（授权体系围绕 from 展开）；
+2. **tokenId 不可复用**：burn 掉 #5 后不得再 mint 一个 #5——链下按事件流建索引的世界观会被打碎（LabNFT 的 `nextTokenId` 自增天然满足）；
+3. **重入面**：safeTransferFrom 回调外部合约（Receiver 钩子），**先改状态、后回调**是强制的（Checks-Effects-Interactions）；Receiver 里可再调市场合约，组合性风险从这进入；
+4. **元数据三件套**（name/symbol/tokenURI）名义可选、事实上必选（钱包市场全依赖）；tokenURI 对不存在的 tokenId 同样 MUST revert。
+
+**LabNFT 与规范的完整差距清单**
+
+| 规范条目 | LabNFT |
+|---|---|
+| Transfer/Approval/ApprovalForAll 事件 | ✅ 全齐 |
+| ownerOf/balanceOf 零值 revert | ✅（balanceOf 未强制 revert 零地址，用 public getter） |
+| transferFrom 全套检查 + 清授权 | ✅ |
+| safeTransferFrom + Receiver | ❌ 未实现 |
+| 转手时补发 Approval(owner, 0, id) | ❌ 只 delete 不发事件 |
+| approve 拒绝 to==owner、setApprovalForAll 拒绝自授权 | ❌ 精简 |
+| supportsInterface | ❌ 未实现 |
+| 元数据 name/symbol/tokenURI | ✅ |
+
+补齐练习：在 LabNFT 上加 safeTransferFrom 只需 ~15 行——`_isContract` 判断 + `IERC721Receiver(to).onERC721Received(...)` + magic value 比对。
 
 ### 22.2 服务端与前端实现
 
@@ -2970,7 +3106,7 @@ calldata 动态数组的标识符在汇编里的含义由编译器定义，不�
         │        （x·y=k 自动定价）
         │             │ LP 份额
         │             ▼
-  07 预言机 ──喂价──► 06 借贷协议 ◄───同一模型──── 08 DeFi 乐高地基
+  07 预言机 ──喂价──► 06 借贷协议 ◄───同一模型──── 08 金库
  （多源中位数）       （ETH 抵押借币）              （LP 抵押借币，三合约咬合）
                           │
                           │ 参数谁来改？
@@ -3665,6 +3801,35 @@ contract LabStaking {                                     // 3
 
 ## 专题 05：DEX 自动做市商（LabAMM）
 
+### 0. AMM 是什么？
+
+**AMM（Automated Market Maker，自动做市商）** 是一种用数学公式代替订单簿来定价的交易机制。传统交易所靠人挂单、撮合引擎配对；AMM 不需要对手盘，**一个资金池 + 一个公式就能让任何人随时买卖**。
+
+**核心机制**：池子里同时装两种资产，储备分别记为 `x` 和 `y`，按一个**不变式（invariant）**定价：
+
+```
+x · y = k       （k 是常数）
+```
+
+你拿 Δx 个 A 换 B，池子变成 `(x+Δx, y-Δy)`，只要乘积不降就算合法：`Δy = y · Δx / (x + Δx)`。价格 `P = y/x` 完全由两边储备的比例决定——**不需要任何人报价**。
+
+**三个关键特性**：
+
+1. **永远有流动性**：曲线上每个点都有价格，不会"没人接单"。但买得越多池子越偏、单价越贵——**价格冲击（滑点）**是公式内生的保护机制，防止大单掏空池子。
+2. **手续费沉淀给 LP**：每笔交易扣 0.3%，不从池里直接扣，而是让输入打 997 折参与定价、全额入池——效果是 **k 每笔变大**，所有 LP 按份额自动分收益。
+3. **LP 做市无需挂单**：任何人往池子两边按比例存资产就能拿 LP 份额，份额价值随 k 增长——"把钱借给公式"就完成做市。
+
+**AMM 的演化**：
+
+| 代际 | 代表 | 不变式 | 特点 |
+|---|---|---|---|
+| V1 | Uniswap V2 | x·y=k | 任意区间均匀分布流动性 |
+| 集中流动性 | Uniswap V3 | x·y=k 但分区间 | LP 自选价格区间，资本效率高 |
+| 稳定币互换 | Curve | 混合曲线 | 1:1 资产近乎直线，低滑点 |
+| V4 | Uniswap V4 | 同 V3 + Hooks | 可编程池（自定义逻辑钩子） |
+
+本站选最经典的 x·y=k（LabAMM.sol），把"恒定乘积"讲透，其他产品都是在此基础上的优化或特化。
+
 ### ① 背景
 
 AMM 用"恒定乘积"取代订单簿：池子里两边储备的乘积保持不变，
@@ -4076,6 +4241,71 @@ contract LabLending {                                     // 3
 
 ## 专题 07：预言机（LabOracle）
 
+### 0. 预言机：应用背景与为什么需要
+
+#### 0.1 区块链的"Oracle Problem"（预言机问题）
+
+EVM 是确定性状态机：同一笔交易在所有节点上必须算出完全相同的结果。合约执行**不能依赖任何外部数据源**——如果节点 A 查到价格是 2000、节点 B 查到 2000.1，对同一笔交易就会算出不同结果，**共识直接崩溃**。
+
+因此智能合约天生是"瞎的"：它不知道 ETH 值多少钱、不知道天气、不知道比赛结果。但大量应用需要外部数据：
+
+| 场景 | 需要什么外部数据 | 没有它的后果 |
+|---|---|---|
+| 借贷清算 | ETH/USD 实时价格 | 清算触发不了 → 坏账累积 |
+| 稳定币 | 锚定资产价格 | 脱锚无法检测/调节 |
+| 衍生品/合成资产 | 标的物行情 | 结算无依据 |
+| 保险 | 天气/航班/灾害数据 | 理赔无法自动化 |
+| 预测市场 | 事件结果 | 无法结算 |
+| 链上随机数 | 不可预测的随机种子 | 抽签/开奖可被矿工操纵 |
+| 跨链桥 | 另一条链的交易确认 | 无法验证跨链消息 |
+
+**预言机（Oracle）就是解决这个问题的桥梁**：把链下数据安全、可靠地"推"到链上，让合约能"看见"外部世界。
+
+#### 0.2 为什么单一数据源不可信
+
+最朴素的方案是让一个可信方（比如 Binance API）把价格写到链上合约。问题：
+
+1. **单点故障**：API 挂了/被 DDoS → 价格停滞，借贷市场无法清算
+2. **中心化信任**：数据源作恶（故意报高价让自己仓位免爆），没人能阻止
+3. **MEV 抢跑**：矿工看到价格更新交易，提前插入套利
+4. **操纵成本极低**：控制一个数据源就能操纵全局价格
+
+业界共识答案：**多数据源 + 聚合（中位数/截尾平均）+ 去中心化节点网络 + 经济激励（质押+罚没）**。控制超过半数节点的串谋成本远高于操纵收益时，系统安全。
+
+#### 0.3 预言机的四种架构模式
+
+| 模式 | 机制 | 代表 | 优缺点 |
+|---|---|---|---|
+| **链下聚合推送** | 独立节点各自取价 → 链上合约聚合 | Chainlink | 最主流；去中心化、抗操纵；gas 成本高、延迟 1-3 区块 |
+| **第一方高频推送** | 数据提供方直接签名推送 | Pyth | 毫秒级延迟；依赖发布者诚信；Solana 系常用 |
+| **链上 TWAP** | 读链上 AMM 储备做时间加权平均 | Uniswap TWAP | 无外部依赖；可被区块内瞬时操纵（TWAP 抹平）；滞后 |
+| **链上储备直接读** | 直接读 AMM 储备算价 | LabLego 的 lpValue | 最简；极易被闪电贷操纵，只适合"非即时清算"场景 |
+
+本站 LabOracle.sol 采用 **Chainlink 思路简化版**：白名单数据源各自独立报价 → 合约排序取中位数。
+
+#### 0.4 预言机要实现的功能（七项完整清单）
+
+对照 LabOracle.sol 逐条标注实现与教学简化：
+
+| # | 功能 | LabOracle 实现 | 真实 Chainlink |
+|---|---|---|---|
+| ① | 白名单管理 | addReporter/addReporters/removeReporter，admin 手动 | 质押保证金 + DAO 准入 + 作恶罚没 |
+| ② | 独立报价 | report(price)，1e18 缩放，手动按键 | 节点按心跳（60s）或偏差阈值自动触发 |
+| ③ | 中位数聚合 | pendingMedian()：收集有效报价 → 插入排序 → 取中位数 | OCR 链下签名聚合，链上验签 |
+| ④ | 轮次历史 | rounds[roundId] = Round(answer, timestamp, count)；第 0 轮 = 创世价 | roundId 对应 Chainlink round，消费方可追溯历史 |
+| ⑤ | 门槛保护 | minReports：报价数不足时聚合搁置，roundId 不涨 | minSubmissions 同义 |
+| ⑥ | 新鲜度检查 | latestTimestamp，消费方自行校验 | heartbeat 超时视为失效，消费方拒用 |
+| ⑦ | 手动触发 | refresh()：任何人可强制再聚合 | 节点自动触发（偏差/心跳到期） |
+
+**中位数抗操纵精确演算**（3 源报 2000 / 2002 / 99999）：
+
+```
+平均数 = (2000 + 2002 + 99999) / 3 = 34667   ← 一笔恶意报价拉爆协议
+中位数 = 排序 [2000, 2002, 99999] 的中间值 = 2002   ← 操纵失效
+```
+
+攻击者必须控制**超过半数**报价者才能拉动中位数（3 源需 ≥2 串谋）。
+
 ### ① 背景
 
 EVM 是确定性状态机，合约**不能自己发 HTTP 请求**查行情——
@@ -4301,7 +4531,68 @@ contract LabOracle {                                      // 2
 
 ---
 
-## 专题 08：DeFi 乐高地基（LabLego）
+## 专题 08：金库（LabLego）
+
+### 0. 什么是金库（Vault）
+
+在 DeFi 中，**金库（Vault）是一个"资产托管 + 策略执行"的中立智能合约**——用户把资产存进去，合约按预定规则自动操作这些资产，用户随时按份额取回。
+
+> 金库 = 一个**只进不出（除非满足条件）的中间人合约**，负责保管资产、执行策略、记账份额。
+
+#### 0.1 本站金库（LabLego 的 Vault 适配层）
+
+本站"金库"特指 LabLego.sol 里的抵押品托管机制：
+
+```
+用户 ──ETH+代币──> [金库合约] ──代调 addLiquidity──> [AMM 池]
+                      │
+                      │  LP 记在金库名下（AMM 的 LP 不可转让）
+                      │  内部 mapping 分户记账 lpCollateral[user]
+                      │
+                      └── 用户可质押 LP 借代币、还清后撤 LP
+```
+
+**为什么需要金库？** 教学版 LabAMM 的 LP 份额是内部 mapping（不是 ERC-20），**不能直接转给借贷合约当抵押品**。金库解决的就是这个"资产不可转让 → 无法做抵押"的问题：
+
+| 没有金库 | 有金库 |
+|---|---|
+| LP 记在用户名下，但转不走 | 金库代持 LP，用户持有金库份额 |
+| 借贷合约拿不到抵押品 | 借贷合约读金库记账 lpCollateral |
+| 撤 LP 需用户自己调 removeLiquidity | 金库代调、按比例退回 |
+
+#### 0.2 金库的核心功能（本站实现）
+
+| 功能 | 实现 | 说明 |
+|---|---|---|
+| 资产托管 | `lpCollateral[user] += lp` | 代持 LP，分户记账 |
+| 建仓 | `automintEnabled()` + `addLiquidity` | 金库代用户向 AMM 存入双边资产 |
+| 抵押借贷 | `maxBorrow() = lpValue × CF − debt` | 金库份额作为抵押品额度来源 |
+| 清算 | `seizeLP(debt)` | 违约时按折扣夺 LP |
+| 撤出 | `unstake(lp)` → `removeLiquidity` | 还清债务后金库代调 AMM 退回资产 |
+
+#### 0.3 真实世界金库对照
+
+| 真实产品 | 金库角色 |
+|---|---|
+| Aave | 存款市场 = 金库（存 ETH 拿 aETH 份额，可借、可清算） |
+| Yearn Finance | 策略金库（存 USDC → 自动找最优收益 → 按份额分收益） |
+| Lido | 质押金库（存 ETH → 代质押到信标链 → 发 stETH 份额） |
+| Curve | 流动性金库（存 LP → gauge 挖矿 → 收益归 LP 持有者） |
+
+**共同特征**：用户存资产 → 合约代持/代操作 → 按份额（ERC-20 或内部记账）确权 → 满足条件可取回。
+
+#### 0.4 金库 vs 普通钱包
+
+| | 普通钱包 | 金库 |
+|---|---|---|
+| 谁能转走 | 持有私钥的人 | **合约逻辑**（满足条件才行） |
+| 能否自动操作 | 不能 | 能（自动建仓、自动计息、自动清算） |
+| 资产形态 | 原始代币 | 份额（代表在池中权益） |
+| 信任模型 | 信任私钥持有者 | 信任合约代码 |
+
+#### 0.5 为什么叫"金库"不叫"合约"
+
+强调它的**被动托管属性**：金库本身不主动投资、不产生收益——它只是"按规则锁住资产"的保险柜。收益来自金库内策略（质押、做市、借贷），但策略逻辑是独立于金库的（借贷逻辑在 LabLending 内核里，金库只是把抵押品和额度关联起来）。
 
 ### ① 背景
 
@@ -5184,6 +5475,43 @@ function reveal(uint256 id) external notPaused {
 博彩合约的 `paused` 只有 owner 能切——一人兼发行、暂停、授权三职，
 私钥即合约。OpenZeppelin AccessControl 把权力拆成
 **"角色 → 成员"的多对多关系表**：ADMIN 铸不了币，MINTER 停不了币。
+
+**renounce vs revoke：主动放弃 vs 被动撤销**
+
+`renounce`（英文原意"正式声明放弃某项权利、头衔或职责"）在智能合约中特指：**持有角色的地址主动把自己从该角色中移除**。一句话区别：**renounce = 自己主动放弃（辞职）；revoke = 管理员撤销别人的（开除）**。
+
+| | `renounce(role)` | `revokeRole(role, user)` |
+|---|---|---|
+| **谁发起** | 自己（`msg.sender` 本人） | 管理员（需 `DEFAULT_ADMIN_ROLE`） |
+| **作用对象** | 调用者自己 | 被指定的目标地址 |
+| **权限要求** | 无（谁都能 renounce 自己的） | 管理员权限 |
+| **语义** | "我不想干了"（辞职） | "你别干了"（开除） |
+| **可被阻止？** | 不能（没人能阻止你辞职） | 管理员说了算 |
+| **触发事件** | `RoleRevoked`（sender == 自己） | `RoleRevoked`（sender == admin） |
+
+**为什么两个都要有**：
+
+| 场景 | 用哪个 |
+|---|---|
+| 员工离职，主动退出 | renounce（不需要管理员配合，隐私好） |
+| 员工私钥泄露，紧急踢出 | revoke（管理员立即撤销，不等本人） |
+| 发现某账户作恶 | revoke（作恶者不会自己 renounce） |
+| 管理员自己也要退出 | renounce（管理员放弃管理权限） |
+
+**OpenZeppelin 的区分技巧**：`RoleRevoked` 事件第三个参数 `sender`——自己 renounce 时 `sender == account`，管理员 revoke 时 `sender != account`（sender 是 admin）。前端可据此显示"主动退出"还是"被踢出"。
+
+**renounce 防钓鱼设计**：如果 ADMIN 可以替别人 renounce，那"回收"与"放弃"两种通道混在一起，恶意/buggy 调用就能悄悄剥掉别人的权限；限定 `account == msg.sender` 后，丢权限只有两条显式路径：ADMIN 明示 revoke（有事件、可归责），或你自己主动 renounce。
+
+**常见误区**：renounce 不等于被惩罚。英文原意就是"宣布放弃"，没有贬义——员工正常离职、项目完成使命（如 Timelock 部署完 renounce deployer 权限、Gnosis Safe 多签完成后 renounce owner）都属正常流程。
+
+**renounceOwnership 的危险性**：OpenZeppelin Ownable 提供 `renounceOwnership()`，调用后 owner 变成零地址——**合约从此没有任何人能改管理员权限、暂停功能、参数**。这是"去中心化收尾"操作，但误调用不可逆：
+
+```solidity
+// 调用后：合约成为"孤儿合约"
+function renounceOwnership() public virtual onlyOwner {
+    _transferOwnership(address(0));
+}
+```
 
 ### ② 代码详解
 

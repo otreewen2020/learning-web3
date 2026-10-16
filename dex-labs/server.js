@@ -115,7 +115,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // ── DeFi 乐高（LP 抵押借贷金库 LabLego）──
+  // ── DeFi 乐高（金库 LabLego）──
   if (req.method === "GET" && urlPath === "/lego") {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(templateJson(LEGO_TEMPLATE));

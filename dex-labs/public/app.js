@@ -435,6 +435,7 @@ async function init() {
   renderGov();
   renderTxs();
   restoreTokensFromChain(); // 后台找回登记簿缺失但链上存在的旧登记（完成后自行刷新下拉框）
+  if (!getGov()) findGovOnChain(); // 治理登记丢失时回链上找回
 }
 
 // ── 发行代币 ──────────────────────────────────────────
@@ -897,6 +898,7 @@ const sSEL = { // 选择器现算；approve 为 ERC-20 稳定值
   totalStaked: () => window.ethers.id("totalStaked()").slice(0, 10),
   rewardRate: () => window.ethers.id("rewardRate()").slice(0, 10),
   periodFinish: () => window.ethers.id("periodFinish()").slice(0, 10),
+  balanceOf: () => window.ethers.id("balanceOf(address)").slice(0, 10),
   approve: "0x095ea7b3",
 };
 const poolKey = (token) => "lab.staking." + token;
@@ -915,6 +917,16 @@ async function erc20Approve(token, spender, amountHuman, purpose) {
   const enc = window.ethers.AbiCoder.defaultAbiCoder();
   const data = sSEL.approve + enc.encode(
     ["address", "uint256"], [spender, parseUnits(String(amountHuman))]).slice(2);
+  // 广播前预检代币余额：LabToken 类不可增发代币余额不够时，approve 看似
+  // 成功但授权额度只有实际余额，下一步扣款必报 allowance——提前报具体数字
+  const balRet = await rpc("eth_call", [{
+    to: token, data: sSEL.balanceOf() + enc.encode(["address"], [wallet.address]).slice(2),
+  }, "latest"]);
+  const have = Number(window.ethers.formatEther(BigInt(balRet === "0x" ? "0" : balRet)));
+  if (have < Number(amountHuman)) {
+    throw new Error(`代币余额不足：需 ${amountHuman}，当前账户只有 ${have}` +
+      `（该代币不支持增发，请改用其它代币发行或先收款）`);
+  }
   const hash = await sendSigned({ to: token, data, gasLimit: "200000", gasPrice: "1000000000" });
   recordTx(hash, purpose);
   log(`交易已广播: ${hash}，等待出块…`);
@@ -1122,6 +1134,9 @@ async function refreshStake() {
   }
   if (!pool) { $("stake-pool-info").textContent = "尚未部署。每个代币各有一个质押池，部署 = 3 笔交易约 45 秒。"; return; }
   try {
+    // rewardRate=0 的两种情形（给用户可操作提示，而不是干巴巴一个 0）：
+    //   从未注入过（periodFinish=0）→ "尚未注入奖励"
+    //   注入过但本期 3600 秒已发完 → "本期已发完，可续注入"
     const enc = window.ethers.AbiCoder.defaultAbiCoder();
     const { formatEther } = window.ethers;
     const call = (sel, args, types) => rpc("eth_call", [{
@@ -1132,14 +1147,22 @@ async function refreshStake() {
     const earned = await call(sSEL.earned(), ["address"], [wallet.address]);
     const total = await call(sSEL.totalStaked(), [], []);
     const rate = await call(sSEL.rewardRate(), [], []);
-    const finish = await call(sSEL.periodFinish(), [], []);
-    const now = BigInt(Math.floor(Date.now() / 1000));
     $("st-total").value = formatEther(staked) + " （金库代币计）";
     $("st-earned").value = formatEther(earned);
     $("st-pool").value = formatEther(total);
-    const remain = finish > now ? Number(finish - now) : 0;
-    $("st-rate").value = `${formatEther(rate)}/秒 · 本期剩余 ${remain} 秒`;
-    $("stake-pool-info").textContent = "质押池: " + pool;
+    if (rate === 0n) {
+      const finish0 = await call(sSEL.periodFinish(), [], []);
+      $("st-rate").value = finish0 === 0n
+        ? "尚未注入奖励——到上方填注入量点「部署/注入」，注入后按秒发放"
+        : "本期奖励已发完——可续注入开启下一期";
+      $("stake-pool-info").textContent = "质押池: " + pool + "（无奖励发放中）";
+    } else {
+      const finish = await call(sSEL.periodFinish(), [], []);
+      const now = BigInt(Math.floor(Date.now() / 1000));
+      const remain = finish > now ? Number(finish - now) : 0;
+      $("st-rate").value = `${formatEther(rate)}/秒 · 本期剩余 ${remain} 秒`;
+      $("stake-pool-info").textContent = "质押池: " + pool;
+    }
   } catch (e) {
     log("刷新状态失败: " + (e.shortMessage || e.message), "err");
   }
@@ -2079,7 +2102,7 @@ function renderOracleTokens() {
   if (cur && list.some((t) => t.address === cur)) sel.value = cur;
 }
 
-// ── DeFi 乐高（LP 抵押借贷金库 LabLego）────────────────
+// ── DeFi 乐高（金库 LabLego）────────────────
 let legoData = null; // /lego 模板
 const legoKey = (token) => "lab.lego." + token;
 const getLegoVault = (token) => localStorage.getItem(legoKey(token)) || "";
@@ -2224,8 +2247,25 @@ async function legoStake() {
   const maxToken = maxTokRaw === "" ? 0 : Number(maxTokRaw);
   if (!(ethAmt > 0) || (!Number.isFinite(maxToken) || maxToken < 0)) return log("请填写 ETH；代币上限留空或填正数", "err");
   const btn = $("btn-lg-stake");
-  btn.disabled = true;
-  try {
+    btn.disabled = true;
+    try {
+      // 防双跑护栏：已有抵押记录时再质押，合约会把新 LP 累加进同一户头——
+      // 用户往往想的是"换一笔"，双跑则造成两份抵押（撤 LP 时一起撤出易困惑）。
+      // 直接累加并在日志给出累加前数值；若本次 ETH 与已有抵押相当，大概率是
+      // 重复点击（按钮被连点/超时重试），要求确认。
+      try {
+        const enc0 = window.ethers.AbiCoder.defaultAbiCoder();
+        const lpRet0 = await rpc("eth_call", [{ to: vault,
+          data: gSEL.lpCollateral() + enc0.encode(["address"], [wallet.address]).slice(2) }, "latest"]);
+        const lpHas = Number(window.ethers.formatEther(BigInt(lpRet0 === "0x" ? 0 : lpRet0)));
+        if (lpHas > 0) {
+          // LP 数量与 ETH 数额无固定换算，凡已有抵押都需确认，防连点/超时误重发
+          if (!window.confirm(`该金库名下已有抵押 ${lpHas} LP，继续将累加（新 LP 并入现有头寸）。继续？`)) {
+            return log("已取消（如需换仓请先「撤出全部 LP」）");
+          }
+          log(`ℹ️ 累加抵押：现有 ${lpHas} LP + 本次 ${ethAmt} ETH 对应新增`);
+        }
+      } catch { /* 读取失败不拦主流程 */ }
     // 留空 = 自动配对（推荐）：首注取「余额 − 注入预留量」建仓（预留量默认 =
     // 上方 fund 注入额，LabToken 不可增发，先给可借池留出资金再配对），
     // 之后按 maxToken=0 让合约取金库余额全额建仓并自动注入可借池（一步到位）。
@@ -2245,38 +2285,54 @@ async function legoStake() {
     const enc = window.ethers.AbiCoder.defaultAbiCoder();
     let data;
     if (maxToken === 0) {
-      // 新合约 + AMM 已有流动性时，maxToken=0 会取金库余额建仓——金库通常为空，
-      // 因此自动模式下首注才允许 0；已有流动性时引导填上限
-      if (!isFresh) {
-        throw new Error("池子已有流动性，续注请填代币上限（滑点保护）。首次建仓请对新金库+新建 AMM 池使用留空模式");
-      }
-      const balRet = await rpc("eth_call", [{ to: token, data: "0x70a08231" + enc.encode(["address"], [wallet.address]).slice(2) }, "latest"]);
-      const bal = BigInt(balRet === "0x" ? "0" : balRet);
-      let reserve = 0n;
+      // 自动配对：首注（新池）= 取「余额 − 注入预留量」建仓；续注（池已有流动性）
+      // = 按池内实时比例自动算 needToken，并把上限自动设为 needToken×1.5（0.5%
+      // 滑点保护）。用户无需手填上限——手填小于配用量必 revert "slippage / ratio"。
+      let approveAmt;
       if (isFresh) {
-        reserve = window.ethers.parseUnits(String(Number($("lg-fund").value) || 0));
+        const balRet = await rpc("eth_call", [{ to: token, data: "0x70a08231" + enc.encode(["address"], [wallet.address]).slice(2) }, "latest"]);
+        const bal = BigInt(balRet === "0x" ? "0" : balRet);
+        const reserve = window.ethers.parseUnits(String(Number($("lg-fund").value) || 0));
         if (bal <= reserve) {
           throw new Error(`余额 ${window.ethers.formatEther(bal)} 不大于注入预留 ${window.ethers.formatEther(reserve)}——请减小上方「注入可借代币」，或手动填代币上限`);
         }
+        approveAmt = bal - reserve;
+        if (approveAmt <= 0n) throw new Error("账户代币余额为 0，无法配对建仓");
+        if (vaultIsNew && reserve > 0n) {
+          log(`自动模式：建仓用 ${window.ethers.formatEther(approveAmt)}，预留 ${window.ethers.formatEther(reserve)} 注入可借池`);
+        }
+      } else {
+        if (!vaultIsNew) {
+          throw new Error("该金库由旧版合约部署，续注请手动填代币上限（不小于池内比例配用量）");
+        }
+        // 续注配对量 = 池代币储备 × 本次 ETH / 池 ETH 储备，上限自动放大 1.5 倍
+        const ammAddr = await rpc("eth_call", [{ to: vault, data: window.ethers.id("amm()").slice(0, 10) }, "latest"])
+          .then((r) => "0x" + r.slice(26)).catch(() => "");
+        if (!ammAddr) throw new Error("读取金库 AMM 地址失败");
+        const [rTokRet, rEthRet] = await Promise.all([
+          rpc("eth_call", [{ to: ammAddr, data: window.ethers.id("reserveToken()").slice(0, 10) }, "latest"]),
+          rpc("eth_call", [{ to: ammAddr, data: window.ethers.id("reserveETH()").slice(0, 10) }, "latest"]),
+        ]);
+        const rTok = BigInt(rTokRet === "0x" ? "0" : rTokRet);
+        const rEth = BigInt(rEthRet === "0x" ? "0" : rEthRet);
+        if (rEth === 0n || rTok === 0n) throw new Error("AMM 池储备异常");
+        const need = rTok * BigInt(window.ethers.parseEther(String(ethAmt))) / rEth;
+        approveAmt = need * 3n / 2n;
+        log(`自动配对：本次需约 ${window.ethers.formatEther(need)} 代币，上限自动取 ${window.ethers.formatEther(approveAmt)}（滑点保护）…`);
       }
-      const pullAmt = bal - reserve;
-      if (pullAmt <= 0n) throw new Error("账户代币余额为 0，无法配对建仓");
       // 精确 approve 后立即校验上链生效（防丢交易/旧 nonce 导致合约拉不到币）
-      const dataA = sSEL.approve + enc.encode(["address", "uint256"], [vault, pullAmt]).slice(2);
+      const dataA = sSEL.approve + enc.encode(["address", "uint256"], [vault, approveAmt]).slice(2);
       const { hash: hA, rc: rcA } = await sendRetry({ to: token, data: dataA, gasLimit: "200000", gasPrice: "1000000000" }, "授权金库代拉代币");
       settleTx(hA, Number(rcA.status) === 1, Number(rcA.blockNumber));
       if (Number(rcA.status) !== 1) throw new Error("approve 回执 status=0");
       const alRet = await rpc("eth_call", [{ to: token,
         data: "0xdd62ed3e" + enc.encode(["address", "address"], [wallet.address, vault]).slice(2) }, "latest"]);
-      if (BigInt(alRet === "0x" ? "0" : alRet) < pullAmt) {
+      if (BigInt(alRet === "0x" ? "0" : alRet) < approveAmt) {
         throw new Error("授权未生效（allowance 不足），请重试");
       }
       log(`✅ 授权成功（区块 ${Number(rcA.blockNumber)}）`, "ok");
-      if (isFresh && reserve > 0n) {
-        log(`自动模式：建仓用 ${window.ethers.formatEther(pullAmt)}，预留 ${window.ethers.formatEther(reserve)} 注入可借池`);
-      }
-      data = gSEL.stakeLiquidity() + enc.encode(["uint256"], [0n]).slice(2);
-      log(`质押流动性 ${ethAmt} ETH（金库代向 AMM 建仓，自动配对 ${window.ethers.formatEther(pullAmt)} 代币${isFresh ? " 并注入可借池" : ""}）…`);
+      data = gSEL.stakeLiquidity() + enc.encode(["uint256"], [isFresh ? 0n : approveAmt]).slice(2);
+      log(`质押流动性 ${ethAmt} ETH（金库代向 AMM 建仓${isFresh ? "，自动配对并注入可借池" : "，按池比例自动配对"}）…`);
     } else {
       if (!isFresh || maxToken <= 0) { /* 续注也走同一 approve+stake 路径 */ }
       await erc20Approve(token, vault, maxToken, "授权金库代拉代币");
@@ -2332,9 +2388,22 @@ async function legoBorrow() {
                 data: gSEL.maxBorrow() + enc2.encode(["address"], [wallet.address]).slice(2) }, "latest"]);
               const lpRet = await rpc("eth_call", [{ to: vault,
                 data: gSEL.lpCollateral() + enc2.encode(["address"], [wallet.address]).slice(2) }, "latest"]);
+              const debtRet = await rpc("eth_call", [{ to: vault,
+                data: gSEL.debtOf() + enc2.encode(["address"], [wallet.address]).slice(2) }, "latest"]).catch(() => "0x");
+              const debtNow = BigInt(debtRet === "0x" ? 0 : debtRet);
               const { formatEther } = window.ethers;
-              throw new Error(`超出抵押购买力——当前 LP 抵押 ${formatEther(BigInt(lpRet === "0x" ? 0 : lpRet))}，` +
-                `最大可借 ${formatEther(BigInt(mbRet === "0x" ? 0 : mbRet))}（借款需 ≤ 该值且 ≤ 池内可借）。` +
+              const lpN = BigInt(lpRet === "0x" ? 0 : lpRet);
+              const mbN = BigInt(mbRet === "0x" ? 0 : mbRet);
+              if (lpN === 0n) {
+                throw new Error(`当前账户在该金库（${token.slice(0, 10)}…）名下抵押为 0——请先「🔒 质押流动性」，` +
+                  `再按「最大可借」的 60% 以内借款（换过浏览器还需确认用的是质押时的同一个账户）`);
+              }
+              if (mbN === 0n) {
+                throw new Error(`抵押已不足以借款——LP 抵押 ${formatEther(lpN)}，但现有债务利息已吃满购买力` +
+                  `（债务 ${formatEther(debtNow)}）。本链利率按秒计息，还清前借不出；点「💰 还清全部」后再试`);
+              }
+              throw new Error(`超出抵押购买力——当前 LP 抵押 ${formatEther(lpN)}，` +
+                `最大可借 ${formatEther(mbN)}（借款需 ≤ 该值且 ≤ 池内可借）。` +
                 `注意金库按所选代币区分，确认选的是质押时的同一个代币`);
             } catch (e3) {
               if (e3.message && /购买力/.test(e3.message)) throw e3;
@@ -2658,6 +2727,7 @@ const gvSEL = { // 选择器统一带 0x 前缀 + 现算（坑 12）
   proposalHead: () => "0x" + window.ethers.id("proposalHead(uint256)").slice(2, 10),
   proposalVotes: () => "0x" + window.ethers.id("proposalVotes(uint256)").slice(2, 10),
   setVotingPeriod: () => "0x" + window.ethers.id("setVotingPeriod(uint256)").slice(2, 10),
+  admin: () => "0x" + window.ethers.id("admin()").slice(2, 10),
 };
 
 async function gvCall(to, data) {
@@ -2809,6 +2879,28 @@ function renderGov() {
   $("gv-target").value = g.box;
 }
 
+// localStorage 登记丢失（换浏览器/清缓存）时按已知地址回查链上：
+// 四件套都活着且 Timelock.admin == Governor 才认为体系完好，回填登记
+async function findGovOnChain() {
+  const known = [
+    ["0x1da8203533ad75b96ac207c7ff44f457943dff3e", "0x5e94788120a0f7ff8b632a23ed5da8f1389c01db",
+      "0x4ff3e28dc5b8880744d661dfe8e50b7a91041018", "0x693a13d49b3335f75460816cd89a1b8703819063"],
+  ];
+  for (const [token, box, timelock, governor] of known) {
+    try {
+      const alive = (a) => rpc("eth_getCode", [a, "latest"]).then((c) => c && c.length > 2);
+      if (!(await alive(token)) || !(await alive(box)) || !(await alive(timelock)) || !(await alive(governor))) continue;
+      const adm = await rpc("eth_call", [{ to: timelock, data: gvSEL.admin() }, "latest"]);
+      if (("0x" + adm.slice(26)).toLowerCase() !== governor.toLowerCase()) continue;
+      localStorage.setItem(GOVKEY, JSON.stringify({ token, box, timelock, governor }));
+      log(`已从链上找回治理体系：Governor ${governor}`, "ok");
+      renderGov();
+      return true;
+    } catch { /* 探测失败继续 */ }
+  }
+  return false;
+}
+
 async function refreshGov() {
   const g = getGov();
   if (!g || !govWallet) return;
@@ -2850,6 +2942,12 @@ async function refreshGov() {
     $("gv-tally").value = "—";
     $("gv-snap").value = "—";
   }
+  // 部署者票被搬走（历史 delegate 误操作）会导致提案预检不足门槛失败。
+  // 只在提案预检因票数不足被拒时才接票（refreshGov 高频调用，绝不能每次发交易）
+  try {
+    const votesRet = await gvCall(g.token, gvSEL.currentVotes() + arg);
+    $("gv-votes").value = votesRet ? window.ethers.formatEther(BigInt(votesRet)) : "0";
+  } catch { /* 读票失败不阻塞刷新 */ }
   const boxR = await gvCall(g.box, gvSEL.boxValue());
   $("gv-newval").placeholder = boxR ? "当前 " + window.ethers.formatEther(BigInt(boxR)) : "";
   const voters = getGovVoters();
@@ -2939,7 +3037,25 @@ async function govPropose() {
           reason = window.ethers.AbiCoder.defaultAbiCoder().decode(["string"], "0x" + d.slice(10))[0];
         }
       } catch { /* 保留原始 message */ }
-      throw new Error("预检失败: " + reason);
+      // 票被历史 delegate 误操作搬走 → 自动自委托接回一次并重试预检
+      if (/below threshold|not enough votes|proposer/i.test(reason)) {
+        log(`提案被拒（${reason}），自委托接回票权后重试…`);
+        const enc2 = window.ethers.AbiCoder.defaultAbiCoder();
+        const rw = await gvSend(g.token,
+          gvSEL.delegate() + enc2.encode(["address"], [govWallet.address]).slice(2), 300000);
+        settleTx(rw.hash, true, Number(rw.rc.blockNumber));
+        const sim2 = await fetch(RPC_ABS, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            jsonrpc: "2.0", id: 1, method: "eth_call",
+            params: [{ from: govWallet.address, to: g.governor, data, gas: "0xDBBA0" }, "latest"],
+          }),
+        }).then((r) => r.json());
+        if (sim2.error) throw new Error("预检失败: " + reason + "（接回票权后仍不足）");
+      } else {
+        throw new Error("预检失败: " + reason);
+      }
     }
     const { hash, rc } = await gvSend(g.governor, data, 900000);
     recordTx(hash, "提交治理提案");
@@ -3032,6 +3148,7 @@ async function govExecute() {
 
 // 页签进入治理：自动就绪治理专属账户（注资走全局 dev 账户）
 async function govTabEnter() {
+  if (!getGov()) await findGovOnChain(); // 登记丢失（换浏览器/清缓存）时回链上找回
   if (govWallet) return;
   await useGovWallet();
   refreshGov();
@@ -3172,7 +3289,7 @@ async function csTopup() {
       localStorage.removeItem(CSKEY);
       throw new Error(`${c.addr.slice(0, 10)}… 不是合约（旧版/已失效赌场登记已清除），请重新部署赌场`);
     }
-    const { hash, rc } = await sendRetry({ to: c.addr, value: amt, gasLimit: "21000" }, "庄家续注");
+    const { hash, rc } = await sendRetry({ to: c.addr, value: amt, gasLimit: "60000" }, "庄家续注");
     settleTx(hash, Number(rc.status) === 1, Number(rc.blockNumber));
     if (Number(rc.status) !== 1) throw new Error("续注回执 status=0");
     log(`✅ 续注成功（区块 ${Number(rc.blockNumber)}）`, "ok");

@@ -16,7 +16,7 @@ dex-labs/
 │   ├── LabAMM.sol          阶段 4：恒定乘积 AMM + 0.3% 手续费（已完成 ✅）
 │   ├── LabLending.sol      阶段 5：超额抵押借贷/计息/健康度/清算（已完成 ✅）
 │   ├── LabOracle.sol       阶段 6：多数据源中位数聚合预言机（已完成 ✅）
-│   ├── LabLego.sol         阶段 7：DeFi 乐高——LP 抵押借贷金库（已完成 ✅）
+│   ├── LabLego.sol         阶段 7：DeFi 乐高——金库（已完成 ✅）
 │   ├── LabGovernance.sol   阶段 8：治理四件套 VoteToken/Governor/Timelock/Box（已完成 ✅）
 │   ├── LabCasino.sol       阶段 9：链上博彩——blockhash 延迟开奖/固定赔率/准备金（已完成 ✅）
 │   ├── LabAccess.sol       阶段 10：身份权限——AccessControl 角色表/白名单 mint/暂停（已完成 ✅）
